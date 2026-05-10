@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import SwiftData
 
 @main
 struct Air_Pollute_TrackerApp: App {
@@ -13,5 +14,6 @@ struct Air_Pollute_TrackerApp: App {
         WindowGroup {
             ContentView()
         }
+        .modelContainer(for: ExposureSample.self)
     }
 }

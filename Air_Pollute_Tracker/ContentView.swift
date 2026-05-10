@@ -6,19 +6,252 @@
 //
 
 import SwiftUI
+import SwiftData
+import Charts
 
 struct ContentView: View {
+    @Environment(\.modelContext) private var modelContext
+    @Query(sort: \ExposureSample.timestamp, order: .reverse) private var samples: [ExposureSample]
+    @StateObject private var tracker = ExposureTracker()
+    @AppStorage(SettingsKeys.openAQAPIKey) private var openAQAPIKey = ""
+    @AppStorage(SettingsKeys.alertThreshold) private var alertThreshold = Defaults.alertThreshold
+    @AppStorage(SettingsKeys.sampleIntervalSeconds) private var sampleIntervalSeconds = Defaults.sampleIntervalSeconds
+
+    private var weekSamples: [ExposureSample] {
+        let cutoff = Calendar.current.date(byAdding: .day, value: -7, to: Date()) ?? .distantPast
+        return samples.filter { $0.timestamp >= cutoff }
+    }
+
     var body: some View {
-        VStack {
-            Image(systemName: "globe")
-                .imageScale(.large)
-                .foregroundStyle(.tint)
-            Text("Hello, world!")
+        NavigationStack {
+            ScrollView {
+                VStack(spacing: 20) {
+                    statusCard
+                    WeeklyReportView(samples: weekSamples, threshold: alertThreshold)
+                    settingsCard
+                    recentSamplesCard
+                }
+                .padding()
+            }
+            .navigationTitle("Air Exposure")
+            .onAppear {
+                tracker.configure(modelContext: modelContext)
+            }
         }
-        .padding()
+    }
+
+    private var statusCard: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Live PM2.5 Exposure")
+                        .font(.headline)
+                    Text(tracker.statusMessage)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Image(systemName: tracker.isTracking ? "location.fill" : "location")
+                    .font(.title2)
+                    .foregroundStyle(tracker.isTracking ? .green : .secondary)
+            }
+
+            if let latest = tracker.lastSample ?? weekSamples.first {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(latest.pm25.formattedPM25)
+                        .font(.system(size: 42, weight: .bold, design: .rounded))
+                    Text("Last sample: \(latest.timestamp.shortDateTimeString) from \(latest.stationCount) station(s)")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            } else {
+                Text("Start tracking to collect the first exposure sample.")
+                    .foregroundStyle(.secondary)
+            }
+
+            if let errorMessage = tracker.errorMessage {
+                Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
+                    .font(.footnote)
+                    .foregroundStyle(.orange)
+            }
+
+            HStack {
+                Button(tracker.isTracking ? "Stop Tracking" : "Start Tracking") {
+                    tracker.isTracking ? tracker.stopTracking() : tracker.startTracking()
+                }
+                .buttonStyle(.borderedProminent)
+
+                Button("Sample Now") {
+                    tracker.sampleCurrentLocationNow()
+                }
+                .buttonStyle(.bordered)
+                .disabled(tracker.isSampling)
+
+                if tracker.isSampling {
+                    ProgressView()
+                }
+            }
+        }
+        .cardStyle()
+    }
+
+    private var settingsCard: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Settings")
+                .font(.headline)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("OpenAQ API Key")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                TextField("Paste key here", text: $openAQAPIKey)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .keyboardType(.asciiCapable)
+                    .textFieldStyle(.roundedBorder)
+                Text("Get a free key at openaq.org/developers/api-keys")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+
+            VStack(alignment: .leading) {
+                Stepper(
+                    "Alert above \(alertThreshold.formattedPM25)",
+                    value: $alertThreshold,
+                    in: 5...150,
+                    step: 5
+                )
+                Text("Default is 35.5 ug/m3, near the PM2.5 unhealthy-for-sensitive-groups threshold.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+
+            Picker("Sampling interval", selection: $sampleIntervalSeconds) {
+                Text("15 min").tag(15.0 * 60.0)
+                Text("30 min").tag(30.0 * 60.0)
+                Text("60 min").tag(60.0 * 60.0)
+            }
+            .pickerStyle(.segmented)
+        }
+        .cardStyle()
+    }
+
+    private var recentSamplesCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Recent Samples")
+                .font(.headline)
+
+            if weekSamples.isEmpty {
+                Text("No samples stored yet.")
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(Array(weekSamples.prefix(8))) { sample in
+                    HStack(alignment: .top) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(sample.timestamp.shortDateTimeString)
+                                .font(.subheadline.weight(.semibold))
+                            Text("Accuracy \(sample.horizontalAccuracy.formatted(.number.precision(.fractionLength(0)))) m · \(sample.sourceSummary)")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(2)
+                        }
+                        Spacer()
+                        Text(sample.pm25.formattedPM25)
+                            .font(.subheadline.weight(.semibold))
+                    }
+                    Divider()
+                }
+            }
+        }
+        .cardStyle()
     }
 }
 
 #Preview {
     ContentView()
+        .modelContainer(for: ExposureSample.self, inMemory: true)
+}
+
+struct WeeklyReportView: View {
+    let samples: [ExposureSample]
+    let threshold: Double
+
+    private var summary: WeeklyExposureSummary {
+        WeeklyExposureReport.summarize(samples: samples, threshold: threshold)
+    }
+
+    private var orderedSamples: [ExposureSample] {
+        samples.sorted { $0.timestamp < $1.timestamp }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Weekly Exposure Report")
+                .font(.headline)
+
+            if samples.isEmpty {
+                Text("After samples are collected, this report will show a seven-day time-weighted PM2.5 average, peak exposure, and time spent above your alert threshold.")
+                    .foregroundStyle(.secondary)
+            } else {
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 2), spacing: 12) {
+                    ReportMetric(title: "TWA PM2.5", value: summary.timeWeightedAveragePM25.formattedPM25)
+                    ReportMetric(title: "Peak PM2.5", value: summary.peakPM25.formattedPM25)
+                    ReportMetric(title: "Tracked time", value: summary.trackedSeconds.formattedDurationHours)
+                    ReportMetric(title: "High exposure", value: summary.highExposureSeconds.formattedDurationHours)
+                }
+
+                Chart(orderedSamples) { sample in
+                    LineMark(
+                        x: .value("Time", sample.timestamp),
+                        y: .value("PM2.5", sample.pm25)
+                    )
+                    PointMark(
+                        x: .value("Time", sample.timestamp),
+                        y: .value("PM2.5", sample.pm25)
+                    )
+                }
+                .frame(height: 180)
+                .chartYScale(domain: 0...(max(summary.peakPM25, threshold) * 1.2))
+
+                if !summary.dailyBreakdown.isEmpty {
+                    Chart(summary.dailyBreakdown) { day in
+                        BarMark(
+                            x: .value("Day", day.date, unit: .day),
+                            y: .value("Average PM2.5", day.averagePM25)
+                        )
+                    }
+                    .frame(height: 140)
+                }
+            }
+        }
+        .cardStyle()
+    }
+}
+
+private struct ReportMetric: View {
+    let title: String
+    let value: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.title3.weight(.semibold))
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding()
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 14))
+    }
+}
+
+private extension View {
+    func cardStyle() -> some View {
+        self
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding()
+            .background(.background, in: RoundedRectangle(cornerRadius: 18))
+            .shadow(color: .black.opacity(0.08), radius: 10, x: 0, y: 4)
+    }
 }
