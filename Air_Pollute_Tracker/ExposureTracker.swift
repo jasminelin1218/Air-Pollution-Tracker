@@ -1,7 +1,13 @@
+import BackgroundTasks
 import Combine
 import CoreLocation
 import Foundation
 import SwiftData
+
+// MARK: - Background task identifier
+extension ExposureTracker {
+    static let bgRefreshID = "edu.ucsd.Air-Pollute-Tracker.refresh"
+}
 
 @MainActor
 final class ExposureTracker: NSObject, ObservableObject {
@@ -17,14 +23,18 @@ final class ExposureTracker: NSObject, ObservableObject {
     private var lastSampleDate: Date?
     private var lastSampleLocation: CLLocation?
 
+    // Set true when we want the next didUpdateLocations to be treated as a one-shot precise fix
+    private var pendingPreciseFix = false
+    // Held while a BGAppRefreshTask is in flight so the delegate can close it
+    private var pendingBGTask: BGTask?
+
     override init() {
         authorizationStatus = locationManager.authorizationStatus
         super.init()
         locationManager.delegate = self
         locationManager.desiredAccuracy = kCLLocationAccuracyHundredMeters
-        locationManager.distanceFilter = Defaults.minimumDistanceMeters
-        locationManager.pausesLocationUpdatesAutomatically = true
-        locationManager.activityType = .fitness
+        locationManager.pausesLocationUpdatesAutomatically = false
+        locationManager.activityType = .other
     }
 
     func configure(modelContext: ModelContext) {
@@ -32,14 +42,19 @@ final class ExposureTracker: NSObject, ObservableObject {
         pruneOldSamples()
     }
 
+    // MARK: - Public control
+
     func startTracking() {
         errorMessage = nil
-
         switch locationManager.authorizationStatus {
         case .notDetermined:
             locationManager.requestAlwaysAuthorization()
-        case .authorizedAlways, .authorizedWhenInUse:
-            beginLocationUpdates()
+        case .authorizedAlways:
+            beginTracking()
+        case .authorizedWhenInUse:
+            statusMessage = "Grant 'Always' location access in Settings for background tracking."
+            errorMessage = "Change location permission to 'Always' in Settings → Privacy → Location Services."
+            beginForegroundOnly()
         case .denied, .restricted:
             statusMessage = "Location permission is required for exposure tracking."
             errorMessage = "Enable location access in Settings to start tracking."
@@ -50,41 +65,63 @@ final class ExposureTracker: NSObject, ObservableObject {
 
     func stopTracking() {
         locationManager.stopUpdatingLocation()
+        locationManager.stopMonitoringSignificantLocationChanges()
+        BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: ExposureTracker.bgRefreshID)
         isTracking = false
         statusMessage = "Tracking paused."
     }
 
     func sampleCurrentLocationNow() {
-        guard let location = locationManager.location else {
-            statusMessage = "Waiting for a location fix."
+        if let location = locationManager.location {
+            Task { await process(location: location, forced: true) }
+        } else {
+            statusMessage = "Waiting for a location fix..."
+            pendingPreciseFix = true
             locationManager.requestLocation()
+        }
+    }
+
+    // MARK: - Internal start modes
+
+    /// Full background mode: significant-change (primary, near-zero battery) +
+    /// continuous low-accuracy foreground updates + BGAppRefreshTask fallback.
+    private func beginTracking() {
+        guard CLLocationManager.locationServicesEnabled() else {
+            statusMessage = "Location services are off."
             return
         }
+        #if os(iOS)
+        locationManager.allowsBackgroundLocationUpdates = true
+        locationManager.showsBackgroundLocationIndicator = true
+        #endif
+        // Significant-change monitoring: resumes even after app termination (iOS re-launches the app).
+        // Fires roughly when the device moves ~500 m or switches cell tower — ideal for our use case.
+        locationManager.startMonitoringSignificantLocationChanges()
+        // Continuous low-accuracy updates while the app is in the foreground,
+        // throttled by shouldSample so only one fetch per interval actually fires.
+        locationManager.distanceFilter = Defaults.minimumDistanceMeters
+        locationManager.startUpdatingLocation()
 
-        Task {
-            await process(location: location, forced: true)
-        }
+        isTracking = true
+        statusMessage = "Tracking (low-power background mode active)."
+        scheduleBackgroundRefresh()
     }
 
-    private func beginLocationUpdates() {
-        if CLLocationManager.locationServicesEnabled() {
-            #if os(iOS)
-            locationManager.allowsBackgroundLocationUpdates = true
-            locationManager.showsBackgroundLocationIndicator = true
-            #endif
-            locationManager.startUpdatingLocation()
-            isTracking = true
-            statusMessage = "Tracking location for exposure samples."
-        } else {
-            statusMessage = "Location services are off."
-        }
+    /// Foreground-only fallback when the user grants only "When in Use".
+    private func beginForegroundOnly() {
+        #if os(iOS)
+        locationManager.allowsBackgroundLocationUpdates = false
+        #endif
+        locationManager.distanceFilter = Defaults.minimumDistanceMeters
+        locationManager.startUpdatingLocation()
+        isTracking = true
+        statusMessage = "Tracking (foreground only — grant Always permission for background)."
     }
+
+    // MARK: - Core sampling
 
     private func process(location: CLLocation, forced: Bool = false) async {
-        guard shouldSample(location: location, forced: forced) else {
-            return
-        }
-
+        guard forced || shouldSample(location: location) else { return }
         guard let modelContext else {
             errorMessage = "Storage is not ready yet."
             return
@@ -120,45 +157,74 @@ final class ExposureTracker: NSObject, ObservableObject {
             lastSample = sample
             lastSampleDate = sample.timestamp
             lastSampleLocation = location
-            statusMessage = "Latest exposure: \(sample.pm25.formattedPM25) PM2.5 from \(sample.stationCount) station(s)."
+            statusMessage = "Latest: \(sample.pm25.formattedPM25) from \(sample.stationCount) station(s) · \(sample.timestamp.shortTimeString)"
             pruneOldSamples()
             await ExposureAlertService.shared.notifyIfNeeded(pm25: sample.pm25)
         } catch {
             errorMessage = error.localizedDescription
-            statusMessage = "Sampling failed."
+            statusMessage = "Sampling failed — will retry on next location update."
         }
 
         isSampling = false
+        scheduleBackgroundRefresh()
     }
 
-    private func shouldSample(location: CLLocation, forced: Bool) -> Bool {
-        guard !forced else { return true }
-
+    private func shouldSample(location: CLLocation) -> Bool {
         let interval = UserDefaults.standard.double(forKey: SettingsKeys.sampleIntervalSeconds)
             .nonZero(defaultValue: Defaults.sampleIntervalSeconds)
-
         if let lastSampleDate, Date().timeIntervalSince(lastSampleDate) < interval {
             return false
         }
-
         if let lastSampleLocation,
            location.distance(from: lastSampleLocation) < Defaults.minimumDistanceMeters,
            Date().timeIntervalSince(lastSampleDate ?? .distantPast) < interval * 2 {
             return false
         }
-
         return true
     }
 
+    // MARK: - BGAppRefreshTask (time-based fallback when the user is stationary)
+
+    func scheduleBackgroundRefresh() {
+        let interval = UserDefaults.standard.double(forKey: SettingsKeys.sampleIntervalSeconds)
+            .nonZero(defaultValue: Defaults.sampleIntervalSeconds)
+        let request = BGAppRefreshTaskRequest(identifier: ExposureTracker.bgRefreshID)
+        request.earliestBeginDate = Date(timeIntervalSinceNow: interval)
+        try? BGTaskScheduler.shared.submit(request)
+    }
+
+    func handleBackgroundRefresh(task: BGAppRefreshTask) {
+        scheduleBackgroundRefresh() // Re-arm immediately so the chain never breaks
+        task.expirationHandler = {
+            self.pendingBGTask = nil
+            task.setTaskCompleted(success: false)
+        }
+
+        if let location = locationManager.location {
+            Task {
+                await process(location: location, forced: false)
+                task.setTaskCompleted(success: true)
+            }
+        } else {
+            // No cached location — request a one-shot precise fix
+            pendingPreciseFix = true
+            pendingBGTask = task
+            locationManager.requestLocation()
+        }
+    }
+
+    // MARK: - Pruning & helpers
+
     private func pruneOldSamples() {
         guard let modelContext else { return }
-        let cutoff = Calendar.current.date(byAdding: .day, value: -7, to: Date()) ?? .distantPast
+        let days = UserDefaults.standard.integer(forKey: SettingsKeys.trackingDays)
+        let retainDays = (days == 1 || days == 7) ? days : 7
+        let cutoff = Calendar.current.date(byAdding: .day, value: -retainDays, to: Date()) ?? .distantPast
         let descriptor = FetchDescriptor<ExposureSample>(
             predicate: #Predicate { sample in
                 sample.timestamp < cutoff
             }
         )
-
         if let oldSamples = try? modelContext.fetch(descriptor), !oldSamples.isEmpty {
             oldSamples.forEach(modelContext.delete)
             try? modelContext.save()
@@ -170,17 +236,20 @@ final class ExposureTracker: NSObject, ObservableObject {
         if !stored.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return stored
         }
-
         return Bundle.main.object(forInfoDictionaryKey: "OPENAQAPIKey") as? String ?? ""
     }
 }
+
+// MARK: - CLLocationManagerDelegate
 
 extension ExposureTracker: CLLocationManagerDelegate {
     nonisolated func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
         Task { @MainActor in
             authorizationStatus = manager.authorizationStatus
-            if manager.authorizationStatus == .authorizedAlways || manager.authorizationStatus == .authorizedWhenInUse {
-                beginLocationUpdates()
+            if manager.authorizationStatus == .authorizedAlways {
+                beginTracking()
+            } else if manager.authorizationStatus == .authorizedWhenInUse {
+                beginForegroundOnly()
             }
         }
     }
@@ -188,15 +257,26 @@ extension ExposureTracker: CLLocationManagerDelegate {
     nonisolated func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
         guard let location = locations.last else { return }
         Task { @MainActor in
-            await process(location: location)
+            if pendingPreciseFix {
+                pendingPreciseFix = false
+                await process(location: location, forced: false)
+                pendingBGTask?.setTaskCompleted(success: true)
+                pendingBGTask = nil
+            } else {
+                await process(location: location)
+            }
         }
     }
 
     nonisolated func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
         Task { @MainActor in
+            pendingPreciseFix = false
+            pendingBGTask?.setTaskCompleted(success: false)
+            pendingBGTask = nil
             errorMessage = error.localizedDescription
             statusMessage = "Location update failed."
         }
     }
 }
+
 

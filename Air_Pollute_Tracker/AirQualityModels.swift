@@ -59,6 +59,28 @@ enum SettingsKeys {
     static let openAQAPIKey = "openAQAPIKey"
     static let alertThreshold = "alertThreshold"
     static let sampleIntervalSeconds = "sampleIntervalSeconds"
+    static let trackingDays = "trackingDays"
+}
+
+enum TrackingDuration: Int, CaseIterable, Identifiable {
+    case oneDay = 1
+    case sevenDays = 7
+
+    var id: Int { rawValue }
+
+    var label: String {
+        switch self {
+        case .oneDay: return "1 Day"
+        case .sevenDays: return "7 Days"
+        }
+    }
+
+    var reportTitle: String {
+        switch self {
+        case .oneDay: return "Daily Exposure Report"
+        case .sevenDays: return "Weekly Exposure Report"
+        }
+    }
 }
 
 enum Defaults {

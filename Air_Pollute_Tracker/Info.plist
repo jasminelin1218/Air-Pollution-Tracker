@@ -40,6 +40,12 @@
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>location</string>
+		<string>fetch</string>
+		<string>processing</string>
+	</array>
+	<key>BGTaskSchedulerPermittedIdentifiers</key>
+	<array>
+		<string>edu.ucsd.Air-Pollute-Tracker.refresh</string>
 	</array>
 	<key>UILaunchScreen</key>
 	<dict/>

@@ -12,13 +12,20 @@ import Charts
 struct ContentView: View {
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \ExposureSample.timestamp, order: .reverse) private var samples: [ExposureSample]
-    @StateObject private var tracker = ExposureTracker()
+    @ObservedObject var sharedTracker: ExposureTracker
     @AppStorage(SettingsKeys.openAQAPIKey) private var openAQAPIKey = ""
     @AppStorage(SettingsKeys.alertThreshold) private var alertThreshold = Defaults.alertThreshold
     @AppStorage(SettingsKeys.sampleIntervalSeconds) private var sampleIntervalSeconds = Defaults.sampleIntervalSeconds
+    @AppStorage(SettingsKeys.trackingDays) private var trackingDays = TrackingDuration.sevenDays.rawValue
 
-    private var weekSamples: [ExposureSample] {
-        let cutoff = Calendar.current.date(byAdding: .day, value: -7, to: Date()) ?? .distantPast
+    private var tracker: ExposureTracker { sharedTracker }
+
+    private var activeDuration: TrackingDuration {
+        TrackingDuration(rawValue: trackingDays) ?? .sevenDays
+    }
+
+    private var windowSamples: [ExposureSample] {
+        let cutoff = Calendar.current.date(byAdding: .day, value: -activeDuration.rawValue, to: Date()) ?? .distantPast
         return samples.filter { $0.timestamp >= cutoff }
     }
 
@@ -27,7 +34,7 @@ struct ContentView: View {
             ScrollView {
                 VStack(spacing: 20) {
                     statusCard
-                    WeeklyReportView(samples: weekSamples, threshold: alertThreshold)
+                    WeeklyReportView(samples: windowSamples, threshold: alertThreshold, duration: activeDuration)
                     settingsCard
                     recentSamplesCard
                 }
@@ -56,7 +63,7 @@ struct ContentView: View {
                     .foregroundStyle(tracker.isTracking ? .green : .secondary)
             }
 
-            if let latest = tracker.lastSample ?? weekSamples.first {
+            if let latest = tracker.lastSample ?? windowSamples.first {
                 VStack(alignment: .leading, spacing: 6) {
                     Text(latest.pm25.formattedPM25)
                         .font(.system(size: 42, weight: .bold, design: .rounded))
@@ -132,6 +139,21 @@ struct ContentView: View {
                 Text("60 min").tag(60.0 * 60.0)
             }
             .pickerStyle(.segmented)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Tracking window")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                Picker("Tracking window", selection: $trackingDays) {
+                    ForEach(TrackingDuration.allCases) { duration in
+                        Text(duration.label).tag(duration.rawValue)
+                    }
+                }
+                .pickerStyle(.segmented)
+                Text("How far back the report and recent samples look.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
         }
         .cardStyle()
     }
@@ -141,11 +163,11 @@ struct ContentView: View {
             Text("Recent Samples")
                 .font(.headline)
 
-            if weekSamples.isEmpty {
+            if windowSamples.isEmpty {
                 Text("No samples stored yet.")
                     .foregroundStyle(.secondary)
             } else {
-                ForEach(Array(weekSamples.prefix(8))) { sample in
+                ForEach(Array(windowSamples.prefix(8))) { sample in
                     HStack(alignment: .top) {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(sample.timestamp.shortDateTimeString)
@@ -168,13 +190,14 @@ struct ContentView: View {
 }
 
 #Preview {
-    ContentView()
+    ContentView(sharedTracker: ExposureTracker())
         .modelContainer(for: ExposureSample.self, inMemory: true)
 }
 
 struct WeeklyReportView: View {
     let samples: [ExposureSample]
     let threshold: Double
+    var duration: TrackingDuration = .sevenDays
 
     private var summary: WeeklyExposureSummary {
         WeeklyExposureReport.summarize(samples: samples, threshold: threshold)
@@ -186,11 +209,11 @@ struct WeeklyReportView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Weekly Exposure Report")
+            Text(duration.reportTitle)
                 .font(.headline)
 
             if samples.isEmpty {
-                Text("After samples are collected, this report will show a seven-day time-weighted PM2.5 average, peak exposure, and time spent above your alert threshold.")
+                Text("After samples are collected, this report will show a \(duration.rawValue == 1 ? "24-hour" : "seven-day") time-weighted PM2.5 average, peak exposure, and time spent above your alert threshold.")
                     .foregroundStyle(.secondary)
             } else {
                 LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 2), spacing: 12) {
