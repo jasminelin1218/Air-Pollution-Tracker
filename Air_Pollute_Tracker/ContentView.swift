@@ -273,27 +273,39 @@ struct WeeklyReportView: View {
                     ReportMetric(title: "High exposure", value: summary.highExposureSeconds.formattedDurationHours)
                 }
 
-                Chart(orderedSamples) { sample in
-                    LineMark(
-                        x: .value("Time", sample.timestamp),
-                        y: .value("PM2.5", sample.pm25)
-                    )
-                    PointMark(
-                        x: .value("Time", sample.timestamp),
-                        y: .value("PM2.5", sample.pm25)
-                    )
-                }
-                .frame(height: 180)
-                .chartYScale(domain: 0...(max(summary.peakPM25, threshold) * 1.2))
-
-                if !summary.dailyBreakdown.isEmpty {
-                    Chart(summary.dailyBreakdown) { day in
-                        BarMark(
-                            x: .value("Day", day.date, unit: .day),
-                            y: .value("Average PM2.5", day.averagePM25)
+                VStack(alignment: .leading, spacing: 6) {
+                    Chart(orderedSamples) { sample in
+                        LineMark(
+                            x: .value("Time", sample.timestamp),
+                            y: .value("PM2.5", sample.pm25)
+                        )
+                        PointMark(
+                            x: .value("Time", sample.timestamp),
+                            y: .value("PM2.5", sample.pm25)
                         )
                     }
-                    .frame(height: 140)
+                    .frame(height: 180)
+                    .chartYScale(domain: 0...(max(summary.peakPM25, threshold) * 1.2))
+
+                    Text("Each point is one estimated PM2.5 reading at the time it was sampled (automatic or manual).")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+
+                if !summary.dailyBreakdown.isEmpty {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Chart(summary.dailyBreakdown) { day in
+                            BarMark(
+                                x: .value("Day", day.date, unit: .day),
+                                y: .value("Average PM2.5", day.averagePM25)
+                            )
+                        }
+                        .frame(height: 140)
+
+                        Text("Each bar is the average PM2.5 for all samples on that calendar day within your tracking window.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
         }

@@ -21,7 +21,12 @@ final class ExposureTracker: NSObject, ObservableObject {
     private let locationManager = CLLocationManager()
     private var modelContext: ModelContext?
     private var lastSampleDate: Date?
-    private var sampleTimer: Timer?
+
+    // Two-phase timer: delayTimer fires once after the remaining wait, then repeatTimer takes over.
+    private var delayTimer: Timer?
+    private var repeatTimer: Timer?
+    // Observes UserDefaults so the timer reschedules live when the interval setting changes.
+    private var intervalCancellable: AnyCancellable?
 
     // Set true when we want the next didUpdateLocations to be treated as a one-shot precise fix
     private var pendingPreciseFix = false
@@ -122,7 +127,13 @@ final class ExposureTracker: NSObject, ObservableObject {
     private func process(location: CLLocation, forced: Bool = false) async {
         guard forced || shouldSample() else { return }
         guard let modelContext else {
-            errorMessage = "Storage is not ready yet."
+            errorMessage = "Storage is not ready yet — will retry on next sample."
+            // Retry once after a short delay to handle the race between
+            // startTracking() and .onAppear setting the modelContext.
+            try? await Task.sleep(for: .seconds(2))
+            if modelContext != nil {
+                await process(location: location, forced: forced)
+            }
             return
         }
 
@@ -178,21 +189,79 @@ final class ExposureTracker: NSObject, ObservableObject {
 
     private func startSampleTimer() {
         stopSampleTimer()
+        scheduleTimerFromLastSample()
+
+        // Re-arm automatically whenever the interval setting changes while tracking.
+        intervalCancellable = NotificationCenter.default
+            .publisher(for: UserDefaults.didChangeNotification)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                guard let self, self.isTracking else { return }
+                let newInterval = UserDefaults.standard.double(forKey: SettingsKeys.sampleIntervalSeconds)
+                    .nonZero(defaultValue: Defaults.sampleIntervalSeconds)
+                let currentInterval = self.repeatTimer?.timeInterval ?? 0
+                guard abs(currentInterval - newInterval) > 0.5 else { return }
+                self.scheduleTimerFromLastSample()
+                self.scheduleBackgroundRefresh()
+            }
+    }
+
+    /// Computes how long until the next sample is due (based on last sample time) and
+    /// fires a one-shot timer for that remaining delay, then switches to a repeating timer.
+    private func scheduleTimerFromLastSample() {
+        delayTimer?.invalidate(); delayTimer = nil
+        repeatTimer?.invalidate(); repeatTimer = nil
+
         let interval = UserDefaults.standard.double(forKey: SettingsKeys.sampleIntervalSeconds)
             .nonZero(defaultValue: Defaults.sampleIntervalSeconds)
-        let timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
+        let elapsed = lastSampleDate.map { Date().timeIntervalSince($0) } ?? interval
+        let delay = max(0, interval - elapsed)
+
+        if delay < 1 {
+            // Already overdue — defer by one runloop cycle to ensure modelContext is set,
+            // then sample and start the repeating cycle.
+            let t = Timer(timeInterval: 0.5, repeats: false) { [weak self] _ in
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.delayTimer = nil
+                    self.requestOneShotLocation(forced: false)
+                    self.startRepeatTimer(interval: interval)
+                }
+            }
+            RunLoop.main.add(t, forMode: .common)
+            delayTimer = t
+        } else {
+            // Wait out the remaining portion of the current interval.
+            let t = Timer(timeInterval: delay, repeats: false) { [weak self] _ in
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.delayTimer = nil
+                    self.requestOneShotLocation(forced: false)
+                    let nextInterval = UserDefaults.standard.double(forKey: SettingsKeys.sampleIntervalSeconds)
+                        .nonZero(defaultValue: Defaults.sampleIntervalSeconds)
+                    self.startRepeatTimer(interval: nextInterval)
+                }
+            }
+            RunLoop.main.add(t, forMode: .common)
+            delayTimer = t
+        }
+    }
+
+    private func startRepeatTimer(interval: TimeInterval) {
+        repeatTimer?.invalidate()
+        let t = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.requestOneShotLocation(forced: false)
             }
         }
-        RunLoop.main.add(timer, forMode: .common)
-        sampleTimer = timer
-        requestOneShotLocation(forced: false)
+        RunLoop.main.add(t, forMode: .common)
+        repeatTimer = t
     }
 
     private func stopSampleTimer() {
-        sampleTimer?.invalidate()
-        sampleTimer = nil
+        delayTimer?.invalidate(); delayTimer = nil
+        repeatTimer?.invalidate(); repeatTimer = nil
+        intervalCancellable = nil
     }
 
     private func requestOneShotLocation(forced: Bool) {
