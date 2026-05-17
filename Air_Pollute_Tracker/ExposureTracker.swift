@@ -144,7 +144,8 @@ final class ExposureTracker: NSObject, ObservableObject {
         do {
             let apiKey = Self.currentAPIKey()
             let readings = try await OpenAQClient(apiKey: apiKey).fetchPM25Readings(
-                near: Coordinate(latitude: location.coordinate.latitude, longitude: location.coordinate.longitude)
+                near: Coordinate(latitude: location.coordinate.latitude, longitude: location.coordinate.longitude),
+                radiusMeters: Defaults.searchRadiusMeters
             )
             let result = try IDWInterpolator.interpolate(
                 at: Coordinate(latitude: location.coordinate.latitude, longitude: location.coordinate.longitude),
@@ -166,7 +167,12 @@ final class ExposureTracker: NSObject, ObservableObject {
 
             lastSample = sample
             lastSampleDate = sample.timestamp
-            statusMessage = "Latest: \(sample.pm25.formattedPM25) from \(sample.stationCount) station(s) · \(sample.timestamp.shortTimeString)"
+            let nearestKm = result.usedReadings
+                .compactMap(\.distanceMeters)
+                .min()
+                .map { String(format: "nearest %.1f km", $0 / 1000) }
+                ?? "distance unknown"
+            statusMessage = "Latest: \(sample.pm25.formattedPM25) · \(sample.stationCount) station(s), \(nearestKm) · \(sample.timestamp.shortTimeString)"
             pruneOldSamples()
             await ExposureAlertService.shared.notifyIfNeeded(pm25: sample.pm25)
         } catch {

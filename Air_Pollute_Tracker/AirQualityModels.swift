@@ -105,7 +105,7 @@ enum TrackingDuration: Int, CaseIterable, Identifiable {
 enum Defaults {
     static let alertThreshold = 35.5
     static let sampleIntervalSeconds = 15.0 * 60.0
-    static let searchRadiusMeters = 25_000
+    static let searchRadiusMeters = 10_000
     static let minimumDistanceMeters = 150.0
 }
 

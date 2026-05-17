@@ -20,6 +20,12 @@ extension Double {
     }
 }
 
+extension Int {
+    func nonZero(defaultValue: Int) -> Int {
+        self > 0 ? self : defaultValue
+    }
+}
+
 extension Date {
     var shortTimeString: String {
         formatted(date: .omitted, time: .shortened)

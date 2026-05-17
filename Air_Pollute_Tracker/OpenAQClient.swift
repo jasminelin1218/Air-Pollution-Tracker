@@ -33,7 +33,7 @@ struct OpenAQClient {
     func fetchPM25Readings(
         near coordinate: Coordinate,
         radiusMeters: Int = 25_000,
-        limit: Int = 20
+        limit: Int = 50
     ) async throws -> [StationReading] {
         guard !apiKey.isEmpty else {
             throw OpenAQClientError.missingAPIKey
@@ -70,9 +70,8 @@ struct OpenAQClient {
         var components = URLComponents(url: baseURL.appending(path: "locations"), resolvingAgainstBaseURL: false)!
         components.queryItems = [
             URLQueryItem(name: "coordinates", value: "\(coordinate.latitude),\(coordinate.longitude)"),
-            URLQueryItem(name: "radius", value: "\(min(radiusMeters, 25_000))"),
-            URLQueryItem(name: "limit", value: "\(limit)"),
-            URLQueryItem(name: "sort_order", value: "asc")
+            URLQueryItem(name: "radius", value: "\(radiusMeters)"),
+            URLQueryItem(name: "limit", value: "\(limit)")
         ]
 
         let response: OpenAQResponse<OpenAQLocation> = try await request(components.url!)
