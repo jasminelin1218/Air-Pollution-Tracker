@@ -21,10 +21,11 @@ final class ExposureTracker: NSObject, ObservableObject {
     private let locationManager = CLLocationManager()
     private var modelContext: ModelContext?
     private var lastSampleDate: Date?
-    private var lastSampleLocation: CLLocation?
+    private var sampleTimer: Timer?
 
     // Set true when we want the next didUpdateLocations to be treated as a one-shot precise fix
     private var pendingPreciseFix = false
+    private var pendingPreciseFixIsForced = false
     // Held while a BGAppRefreshTask is in flight so the delegate can close it
     private var pendingBGTask: BGTask?
 
@@ -33,7 +34,7 @@ final class ExposureTracker: NSObject, ObservableObject {
         super.init()
         locationManager.delegate = self
         locationManager.desiredAccuracy = kCLLocationAccuracyHundredMeters
-        locationManager.pausesLocationUpdatesAutomatically = false
+        locationManager.pausesLocationUpdatesAutomatically = true
         locationManager.activityType = .other
     }
 
@@ -66,6 +67,7 @@ final class ExposureTracker: NSObject, ObservableObject {
     func stopTracking() {
         locationManager.stopUpdatingLocation()
         locationManager.stopMonitoringSignificantLocationChanges()
+        stopSampleTimer()
         BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: ExposureTracker.bgRefreshID)
         isTracking = false
         statusMessage = "Tracking paused."
@@ -76,15 +78,14 @@ final class ExposureTracker: NSObject, ObservableObject {
             Task { await process(location: location, forced: true) }
         } else {
             statusMessage = "Waiting for a location fix..."
-            pendingPreciseFix = true
-            locationManager.requestLocation()
+            requestOneShotLocation(forced: true)
         }
     }
 
     // MARK: - Internal start modes
 
     /// Full background mode: significant-change (primary, near-zero battery) +
-    /// continuous low-accuracy foreground updates + BGAppRefreshTask fallback.
+    /// periodic one-shot location requests + BGAppRefreshTask fallback.
     private func beginTracking() {
         guard CLLocationManager.locationServicesEnabled() else {
             statusMessage = "Location services are off."
@@ -97,13 +98,11 @@ final class ExposureTracker: NSObject, ObservableObject {
         // Significant-change monitoring: resumes even after app termination (iOS re-launches the app).
         // Fires roughly when the device moves ~500 m or switches cell tower — ideal for our use case.
         locationManager.startMonitoringSignificantLocationChanges()
-        // Continuous low-accuracy updates while the app is in the foreground,
-        // throttled by shouldSample so only one fetch per interval actually fires.
         locationManager.distanceFilter = Defaults.minimumDistanceMeters
-        locationManager.startUpdatingLocation()
+        startSampleTimer()
 
         isTracking = true
-        statusMessage = "Tracking (low-power background mode active)."
+        statusMessage = "Tracking (low-power periodic sampling active)."
         scheduleBackgroundRefresh()
     }
 
@@ -113,7 +112,7 @@ final class ExposureTracker: NSObject, ObservableObject {
         locationManager.allowsBackgroundLocationUpdates = false
         #endif
         locationManager.distanceFilter = Defaults.minimumDistanceMeters
-        locationManager.startUpdatingLocation()
+        startSampleTimer()
         isTracking = true
         statusMessage = "Tracking (foreground only — grant Always permission for background)."
     }
@@ -121,7 +120,7 @@ final class ExposureTracker: NSObject, ObservableObject {
     // MARK: - Core sampling
 
     private func process(location: CLLocation, forced: Bool = false) async {
-        guard forced || shouldSample(location: location) else { return }
+        guard forced || shouldSample() else { return }
         guard let modelContext else {
             errorMessage = "Storage is not ready yet."
             return
@@ -156,7 +155,6 @@ final class ExposureTracker: NSObject, ObservableObject {
 
             lastSample = sample
             lastSampleDate = sample.timestamp
-            lastSampleLocation = location
             statusMessage = "Latest: \(sample.pm25.formattedPM25) from \(sample.stationCount) station(s) · \(sample.timestamp.shortTimeString)"
             pruneOldSamples()
             await ExposureAlertService.shared.notifyIfNeeded(pm25: sample.pm25)
@@ -169,18 +167,38 @@ final class ExposureTracker: NSObject, ObservableObject {
         scheduleBackgroundRefresh()
     }
 
-    private func shouldSample(location: CLLocation) -> Bool {
+    private func shouldSample() -> Bool {
         let interval = UserDefaults.standard.double(forKey: SettingsKeys.sampleIntervalSeconds)
             .nonZero(defaultValue: Defaults.sampleIntervalSeconds)
         if let lastSampleDate, Date().timeIntervalSince(lastSampleDate) < interval {
             return false
         }
-        if let lastSampleLocation,
-           location.distance(from: lastSampleLocation) < Defaults.minimumDistanceMeters,
-           Date().timeIntervalSince(lastSampleDate ?? .distantPast) < interval * 2 {
-            return false
-        }
         return true
+    }
+
+    private func startSampleTimer() {
+        stopSampleTimer()
+        let interval = UserDefaults.standard.double(forKey: SettingsKeys.sampleIntervalSeconds)
+            .nonZero(defaultValue: Defaults.sampleIntervalSeconds)
+        let timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.requestOneShotLocation(forced: false)
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        sampleTimer = timer
+        requestOneShotLocation(forced: false)
+    }
+
+    private func stopSampleTimer() {
+        sampleTimer?.invalidate()
+        sampleTimer = nil
+    }
+
+    private func requestOneShotLocation(forced: Bool) {
+        pendingPreciseFix = true
+        pendingPreciseFixIsForced = forced
+        locationManager.requestLocation()
     }
 
     // MARK: - BGAppRefreshTask (time-based fallback when the user is stationary)
@@ -202,14 +220,13 @@ final class ExposureTracker: NSObject, ObservableObject {
 
         if let location = locationManager.location {
             Task {
-                await process(location: location, forced: false)
+                await process(location: location, forced: true)
                 task.setTaskCompleted(success: true)
             }
         } else {
             // No cached location — request a one-shot precise fix
-            pendingPreciseFix = true
             pendingBGTask = task
-            locationManager.requestLocation()
+            requestOneShotLocation(forced: true)
         }
     }
 
@@ -217,9 +234,10 @@ final class ExposureTracker: NSObject, ObservableObject {
 
     private func pruneOldSamples() {
         guard let modelContext else { return }
-        let days = UserDefaults.standard.integer(forKey: SettingsKeys.trackingDays)
-        let retainDays = (days == 1 || days == 7) ? days : 7
-        let cutoff = Calendar.current.date(byAdding: .day, value: -retainDays, to: Date()) ?? .distantPast
+        let rawDuration = UserDefaults.standard.object(forKey: SettingsKeys.trackingDays) as? Int
+            ?? TrackingDuration.sevenDays.rawValue
+        let duration = TrackingDuration(rawValue: rawDuration) ?? .sevenDays
+        let cutoff = Date().addingTimeInterval(-duration.windowInterval)
         let descriptor = FetchDescriptor<ExposureSample>(
             predicate: #Predicate { sample in
                 sample.timestamp < cutoff
@@ -258,8 +276,10 @@ extension ExposureTracker: CLLocationManagerDelegate {
         guard let location = locations.last else { return }
         Task { @MainActor in
             if pendingPreciseFix {
+                let forced = pendingPreciseFixIsForced
                 pendingPreciseFix = false
-                await process(location: location, forced: false)
+                pendingPreciseFixIsForced = false
+                await process(location: location, forced: forced)
                 pendingBGTask?.setTaskCompleted(success: true)
                 pendingBGTask = nil
             } else {
@@ -271,6 +291,7 @@ extension ExposureTracker: CLLocationManagerDelegate {
     nonisolated func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
         Task { @MainActor in
             pendingPreciseFix = false
+            pendingPreciseFixIsForced = false
             pendingBGTask?.setTaskCompleted(success: false)
             pendingBGTask = nil
             errorMessage = error.localizedDescription

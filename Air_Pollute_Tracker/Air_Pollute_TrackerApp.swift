@@ -8,12 +8,20 @@
 import BackgroundTasks
 import SwiftData
 import SwiftUI
+import UserNotifications
 
 @main
 struct Air_Pollute_TrackerApp: App {
     @StateObject private var tracker = ExposureTracker()
 
     init() {
+        let center = UNUserNotificationCenter.current()
+        center.delegate = NotificationDelegate.shared
+
+        Task {
+            try? await center.requestAuthorization(options: [.alert, .sound, .badge])
+        }
+
         BGTaskScheduler.shared.register(
             forTaskWithIdentifier: ExposureTracker.bgRefreshID,
             using: nil
@@ -34,6 +42,22 @@ struct Air_Pollute_TrackerApp: App {
                 .onAppear { AppState.shared.tracker = tracker }
         }
         .modelContainer(for: ExposureSample.self)
+    }
+}
+
+/// Dedicated delegate so the UNUserNotificationCenter delegate lifetime is
+/// not tied to the SwiftUI App struct lifecycle.
+final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
+    static let shared = NotificationDelegate()
+    private override init() {}
+
+    /// Show banner + play sound even when the app is in the foreground.
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        completionHandler([.banner, .sound, .badge])
     }
 }
 

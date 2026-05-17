@@ -63,6 +63,7 @@ enum SettingsKeys {
 }
 
 enum TrackingDuration: Int, CaseIterable, Identifiable {
+    case oneHour = 0
     case oneDay = 1
     case sevenDays = 7
 
@@ -70,6 +71,7 @@ enum TrackingDuration: Int, CaseIterable, Identifiable {
 
     var label: String {
         switch self {
+        case .oneHour: return "1 Hour"
         case .oneDay: return "1 Day"
         case .sevenDays: return "7 Days"
         }
@@ -77,8 +79,25 @@ enum TrackingDuration: Int, CaseIterable, Identifiable {
 
     var reportTitle: String {
         switch self {
+        case .oneHour: return "Hourly Exposure Report"
         case .oneDay: return "Daily Exposure Report"
         case .sevenDays: return "Weekly Exposure Report"
+        }
+    }
+
+    var reportWindowDescription: String {
+        switch self {
+        case .oneHour: return "one-hour"
+        case .oneDay: return "24-hour"
+        case .sevenDays: return "seven-day"
+        }
+    }
+
+    var windowInterval: TimeInterval {
+        switch self {
+        case .oneHour: return 60.0 * 60.0
+        case .oneDay: return 24.0 * 60.0 * 60.0
+        case .sevenDays: return 7.0 * 24.0 * 60.0 * 60.0
         }
     }
 }

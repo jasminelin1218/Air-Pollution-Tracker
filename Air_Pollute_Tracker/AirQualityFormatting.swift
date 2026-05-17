@@ -5,6 +5,11 @@ extension Double {
         self > 0 ? self : defaultValue
     }
 
+    func rounded(toPlaces places: Int) -> Double {
+        let factor = pow(10.0, Double(places))
+        return (self * factor).rounded() / factor
+    }
+
     var formattedPM25: String {
         formatted(.number.precision(.fractionLength(1))) + " ug/m3"
     }

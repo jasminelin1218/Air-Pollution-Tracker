@@ -17,6 +17,7 @@ struct ContentView: View {
     @AppStorage(SettingsKeys.alertThreshold) private var alertThreshold = Defaults.alertThreshold
     @AppStorage(SettingsKeys.sampleIntervalSeconds) private var sampleIntervalSeconds = Defaults.sampleIntervalSeconds
     @AppStorage(SettingsKeys.trackingDays) private var trackingDays = TrackingDuration.sevenDays.rawValue
+    @State private var isOpenAQAPIKeyVisible = false
 
     private var tracker: ExposureTracker { sharedTracker }
 
@@ -25,7 +26,7 @@ struct ContentView: View {
     }
 
     private var windowSamples: [ExposureSample] {
-        let cutoff = Calendar.current.date(byAdding: .day, value: -activeDuration.rawValue, to: Date()) ?? .distantPast
+        let cutoff = Date().addingTimeInterval(-activeDuration.windowInterval)
         return samples.filter { $0.timestamp >= cutoff }
     }
 
@@ -111,24 +112,68 @@ struct ContentView: View {
                 Text("OpenAQ API Key")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
-                TextField("Paste key here", text: $openAQAPIKey)
+                ZStack(alignment: .trailing) {
+                    Group {
+                        if isOpenAQAPIKeyVisible {
+                            TextField("Paste key here", text: $openAQAPIKey)
+                        } else {
+                            SecureField("Paste key here", text: $openAQAPIKey)
+                        }
+                    }
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                     .keyboardType(.asciiCapable)
                     .textFieldStyle(.roundedBorder)
+                    .padding(.trailing, 36)
+
+                    Button {
+                        isOpenAQAPIKeyVisible.toggle()
+                    } label: {
+                        Image(systemName: isOpenAQAPIKeyVisible ? "eye.slash" : "eye")
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.trailing, 10)
+                    .accessibilityLabel(isOpenAQAPIKeyVisible ? "Hide OpenAQ API key" : "Show OpenAQ API key")
+                }
                 Text("Get a free key at openaq.org/developers/api-keys")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
             }
 
-            VStack(alignment: .leading) {
-                Stepper(
-                    "Alert above \(alertThreshold.formattedPM25)",
-                    value: $alertThreshold,
-                    in: 5...150,
-                    step: 5
-                )
-                Text("Default is 35.5 ug/m3, near the PM2.5 unhealthy-for-sensitive-groups threshold.")
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Alert threshold")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                HStack(spacing: 0) {
+                    Button {
+                        let next = (alertThreshold - 0.1).rounded(toPlaces: 1)
+                        alertThreshold = max(next, 0.1)
+                        ExposureAlertService.shared.resetCooldown()
+                    } label: {
+                        Image(systemName: "minus")
+                            .frame(width: 44, height: 36)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.bordered)
+
+                    Text(alertThreshold.formattedPM25)
+                        .font(.body.monospacedDigit())
+                        .frame(minWidth: 100)
+                        .multilineTextAlignment(.center)
+
+                    Button {
+                        let next = (alertThreshold + 0.1).rounded(toPlaces: 1)
+                        alertThreshold = min(next, 150)
+                        ExposureAlertService.shared.resetCooldown()
+                    } label: {
+                        Image(systemName: "plus")
+                            .frame(width: 44, height: 36)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.bordered)
+                }
+                Text("Default is 35.5 ug/m3, near the PM2.5 unhealthy-for-sensitive-groups threshold. Changing the threshold resets the alert cooldown.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
@@ -198,9 +243,14 @@ struct WeeklyReportView: View {
     let samples: [ExposureSample]
     let threshold: Double
     var duration: TrackingDuration = .sevenDays
+    @AppStorage(SettingsKeys.sampleIntervalSeconds) private var sampleIntervalSeconds = Defaults.sampleIntervalSeconds
 
     private var summary: WeeklyExposureSummary {
-        WeeklyExposureReport.summarize(samples: samples, threshold: threshold)
+        WeeklyExposureReport.summarize(
+            samples: samples,
+            threshold: threshold,
+            maxGapSeconds: min(sampleIntervalSeconds.nonZero(defaultValue: Defaults.sampleIntervalSeconds) * 2, duration.windowInterval / 4)
+        )
     }
 
     private var orderedSamples: [ExposureSample] {
@@ -213,7 +263,7 @@ struct WeeklyReportView: View {
                 .font(.headline)
 
             if samples.isEmpty {
-                Text("After samples are collected, this report will show a \(duration.rawValue == 1 ? "24-hour" : "seven-day") time-weighted PM2.5 average, peak exposure, and time spent above your alert threshold.")
+                Text("After samples are collected, this report will show a \(duration.reportWindowDescription) time-weighted PM2.5 average, peak exposure, and time spent above your alert threshold.")
                     .foregroundStyle(.secondary)
             } else {
                 LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 2), spacing: 12) {
