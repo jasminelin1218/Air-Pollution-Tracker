@@ -3,6 +3,7 @@ import Combine
 import CoreLocation
 import Foundation
 import SwiftData
+import UIKit
 
 // MARK: - Background task identifier
 extension ExposureTracker {
@@ -104,7 +105,14 @@ final class ExposureTracker: NSObject, ObservableObject {
         // Significant-change monitoring: resumes even after app termination (iOS re-launches the app).
         // Fires roughly when the device moves ~500 m or switches cell tower — ideal for our use case.
         locationManager.startMonitoringSignificantLocationChanges()
-        locationManager.distanceFilter = Defaults.minimumDistanceMeters
+        // Low-accuracy continuous updates wake the app in the background even when stationary,
+        // bridging gaps between significant-location events and BGAppRefreshTask deliveries.
+        // kCLLocationAccuracyThreeKilometers is sufficient for a 10 km OpenAQ search radius
+        // while minimising battery use; didUpdateLocations is gated by shouldSample() so
+        // OpenAQ is not called on every small jitter.
+        locationManager.desiredAccuracy = kCLLocationAccuracyThreeKilometers
+        locationManager.distanceFilter = kCLDistanceFilterNone
+        locationManager.startUpdatingLocation()
         startSampleTimer()
 
         isTracking = true
@@ -117,6 +125,7 @@ final class ExposureTracker: NSObject, ObservableObject {
         #if os(iOS)
         locationManager.allowsBackgroundLocationUpdates = false
         #endif
+        locationManager.stopUpdatingLocation()
         locationManager.distanceFilter = Defaults.minimumDistanceMeters
         startSampleTimer()
         isTracking = true
@@ -275,6 +284,34 @@ final class ExposureTracker: NSObject, ObservableObject {
             pendingBGTask = task
             requestOneShotLocation(forced: false)
         }
+    }
+
+    // MARK: - Scene-phase lifecycle hooks
+
+    /// Called when the app enters the background (scene phase observer).
+    /// Schedules a BG refresh and uses a short UIKit background task to attempt
+    /// one final sample before the process is suspended.
+    func appDidEnterBackground() {
+        guard isTracking else { return }
+        scheduleBackgroundRefresh()
+        var bgTaskID = UIBackgroundTaskIdentifier.invalid
+        bgTaskID = UIApplication.shared.beginBackgroundTask(withName: "AirPollute.catchUpSample") {
+            UIApplication.shared.endBackgroundTask(bgTaskID)
+        }
+        guard bgTaskID != .invalid else { return }
+        Task {
+            if let location = locationManager.location {
+                await process(location: location, forced: false)
+            }
+            UIApplication.shared.endBackgroundTask(bgTaskID)
+        }
+    }
+
+    /// Called when the app returns to the foreground (scene phase observer).
+    /// Re-arms the sample timer so it fires on schedule or immediately if overdue.
+    func appWillEnterForeground() {
+        guard isTracking else { return }
+        scheduleNextSample()
     }
 
     // MARK: - Pruning & helpers

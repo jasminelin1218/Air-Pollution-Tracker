@@ -17,6 +17,7 @@ struct ContentView: View {
     @AppStorage(SettingsKeys.alertThreshold) private var alertThreshold = Defaults.alertThreshold
     @AppStorage(SettingsKeys.sampleIntervalSeconds) private var sampleIntervalSeconds = Defaults.sampleIntervalSeconds
     @AppStorage(SettingsKeys.trackingDays) private var trackingDays = TrackingDuration.sevenDays.rawValue
+    @Environment(\.scenePhase) private var scenePhase
     @State private var isOpenAQAPIKeyVisible = false
 
     private var tracker: ExposureTracker { sharedTracker }
@@ -44,6 +45,16 @@ struct ContentView: View {
             .navigationTitle("Air Exposure")
             .onAppear {
                 tracker.configure(modelContext: modelContext)
+            }
+        }
+        .onChange(of: scenePhase) { _, newPhase in
+            switch newPhase {
+            case .background:
+                tracker.appDidEnterBackground()
+            case .active:
+                tracker.appWillEnterForeground()
+            default:
+                break
             }
         }
     }
@@ -240,6 +251,7 @@ struct WeeklyReportView: View {
     let threshold: Double
     var duration: TrackingDuration = .sevenDays
     @AppStorage(SettingsKeys.sampleIntervalSeconds) private var sampleIntervalSeconds = Defaults.sampleIntervalSeconds
+    @State private var selectedDate: Date?
 
     private var summary: WeeklyExposureSummary {
         WeeklyExposureReport.summarize(
@@ -251,6 +263,23 @@ struct WeeklyReportView: View {
 
     private var orderedSamples: [ExposureSample] {
         samples.sorted { $0.timestamp < $1.timestamp }
+    }
+
+    /// Width of the visible x-domain when the chart is scrollable (in seconds).
+    private var visibleDomainSeconds: Int {
+        switch duration {
+        case .sevenDays: return 86_400        // show ~1 day at a time
+        case .oneDay:    return 6 * 3_600     // show ~6 hours at a time
+        case .oneHour:   return 3_600
+        }
+    }
+
+    /// Sample closest to the touched x position.
+    private var selectedSample: ExposureSample? {
+        guard let date = selectedDate else { return nil }
+        return orderedSamples.min {
+            abs($0.timestamp.timeIntervalSince(date)) < abs($1.timestamp.timeIntervalSince(date))
+        }
     }
 
     var body: some View {
@@ -270,22 +299,56 @@ struct WeeklyReportView: View {
                 }
 
                 VStack(alignment: .leading, spacing: 6) {
-                    Chart(orderedSamples) { sample in
-                        LineMark(
-                            x: .value("Time", sample.timestamp),
-                            y: .value("PM2.5", sample.pm25)
-                        )
-                        PointMark(
-                            x: .value("Time", sample.timestamp),
-                            y: .value("PM2.5", sample.pm25)
-                        )
+                    let maxY = max(summary.peakPM25, threshold) * 1.2
+                    Chart {
+                        ForEach(orderedSamples, id: \.id) { sample in
+                            LineMark(
+                                x: .value("Time", sample.timestamp),
+                                y: .value("PM2.5", sample.pm25)
+                            )
+                            .interpolationMethod(.catmullRom)
+                            PointMark(
+                                x: .value("Time", sample.timestamp),
+                                y: .value("PM2.5", sample.pm25)
+                            )
+                            .symbolSize(selectedSample?.id == sample.id ? 160 : 40)
+                        }
+                        // EPA breakpoint reference lines
+                        RuleMark(y: .value("Good", 12.0))
+                            .foregroundStyle(.green.opacity(0.45))
+                            .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3]))
+                        RuleMark(y: .value("Moderate", 35.4))
+                            .foregroundStyle(.yellow.opacity(0.6))
+                            .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3]))
+                        RuleMark(y: .value("USG", 55.4))
+                            .foregroundStyle(.orange.opacity(0.6))
+                            .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3]))
                     }
-                    .frame(height: 180)
-                    .chartYScale(domain: 0...(max(summary.peakPM25, threshold) * 1.2))
+                    .frame(height: 200)
+                    .chartScrollableAxes(.horizontal)
+                    .chartXVisibleDomain(length: visibleDomainSeconds)
+                    .chartYScale(domain: 0...maxY)
+                    .chartXSelection(value: $selectedDate)
+                    .chartOverlay { proxy in
+                        GeometryReader { geo in
+                            if let nearest = selectedSample,
+                               let xPos = proxy.position(forX: nearest.timestamp),
+                               let yPos = proxy.position(forY: nearest.pm25) {
+                                let clampedX = min(max(xPos, 100), geo.size.width - 100)
+                                let calloutY = yPos > geo.size.height * 0.55
+                                    ? yPos - 98 : yPos + 78
+                                SampleCallout(sample: nearest)
+                                    .position(x: clampedX, y: calloutY)
+                                    .allowsHitTesting(false)
+                            }
+                        }
+                    }
 
-                    Text("Each point is one estimated PM2.5 reading at the time it was sampled (automatic or manual).")
+                    Text("Tap a dot to see sample details; scroll horizontally to explore earlier readings.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
+
+                    PM25LegendView()
                 }
 
                 if !summary.dailyBreakdown.isEmpty {
@@ -334,5 +397,88 @@ private extension View {
             .padding()
             .background(.background, in: RoundedRectangle(cornerRadius: 18))
             .shadow(color: .black.opacity(0.08), radius: 10, x: 0, y: 4)
+    }
+}
+
+// MARK: - Chart callout
+
+private struct SampleCallout: View {
+    let sample: ExposureSample
+
+    private var stations: [String] {
+        sample.sourceSummary.components(separatedBy: ", ").filter { !$0.isEmpty }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(sample.timestamp.shortDateTimeString)
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Text(sample.pm25.formattedPM25)
+                .font(.subheadline.weight(.bold))
+            if !stations.isEmpty {
+                Divider()
+                Text("\(sample.stationCount) contributing station\(sample.stationCount == 1 ? "" : "s"):")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                ForEach(stations.prefix(5), id: \.self) { station in
+                    Text("• \(station)")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                if stations.count > 5 {
+                    Text("+ \(stations.count - 5) more")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+            }
+        }
+        .padding(8)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
+        .shadow(color: .black.opacity(0.12), radius: 6, x: 0, y: 3)
+        .frame(maxWidth: 210)
+    }
+}
+
+// MARK: - PM2.5 legend
+
+private struct PM25LegendView: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text("PM2.5 reference levels (µg/m³):")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+            LegendRow(color: .green,  label: "Good",                           range: "0–12")
+            LegendRow(color: .yellow, label: "Moderate",                       range: "12.1–35.4")
+            LegendRow(color: .orange, label: "Unhealthy for Sensitive Groups", range: "35.5–55.4")
+            LegendRow(color: .red,    label: "Unhealthy",                      range: "55.5–150.4")
+            LegendRow(color: .purple, label: "Very Unhealthy / Hazardous",     range: "150.5+")
+            Text("At Moderate and above, sensitive groups — children, older adults, and those with heart or lung conditions — should reduce prolonged outdoor activity.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 2)
+        }
+    }
+}
+
+private struct LegendRow: View {
+    let color: Color
+    let label: String
+    let range: String
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Circle()
+                .fill(color.opacity(0.85))
+                .frame(width: 7, height: 7)
+            Text(label)
+                .font(.caption2.weight(.medium))
+                .foregroundStyle(.secondary)
+            Text(range)
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+        }
     }
 }
