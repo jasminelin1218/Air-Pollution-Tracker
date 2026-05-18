@@ -22,11 +22,12 @@ final class ExposureTracker: NSObject, ObservableObject {
     private var modelContext: ModelContext?
     private var lastSampleDate: Date?
 
-    // Two-phase timer: delayTimer fires once after the remaining wait, then repeatTimer takes over.
-    private var delayTimer: Timer?
-    private var repeatTimer: Timer?
+    // Single chained sample timer.
+    private var sampleTimer: Timer?
     // Observes UserDefaults so the timer reschedules live when the interval setting changes.
     private var intervalCancellable: AnyCancellable?
+    // Prevents concurrent process() calls from producing duplicate samples.
+    private var isProcessingSample = false
 
     // Set true when we want the next didUpdateLocations to be treated as a one-shot precise fix
     private var pendingPreciseFix = false
@@ -126,6 +127,9 @@ final class ExposureTracker: NSObject, ObservableObject {
 
     private func process(location: CLLocation, forced: Bool = false) async {
         guard forced || shouldSample() else { return }
+        guard !isProcessingSample else { return }
+        isProcessingSample = true
+        defer { isProcessingSample = false }
         guard let modelContext else {
             errorMessage = "Storage is not ready yet — will retry on next sample."
             // Retry once after a short delay to handle the race between
@@ -175,9 +179,11 @@ final class ExposureTracker: NSObject, ObservableObject {
             statusMessage = "Latest: \(sample.pm25.formattedPM25) · \(sample.stationCount) station(s), \(nearestKm) · \(sample.timestamp.shortTimeString)"
             pruneOldSamples()
             await ExposureAlertService.shared.notifyIfNeeded(pm25: sample.pm25)
+            if isTracking { scheduleNextSample() }
         } catch {
             errorMessage = error.localizedDescription
             statusMessage = "Sampling failed — will retry on next location update."
+            if isTracking { scheduleNextSample() }
         }
 
         isSampling = false
@@ -195,7 +201,7 @@ final class ExposureTracker: NSObject, ObservableObject {
 
     private func startSampleTimer() {
         stopSampleTimer()
-        scheduleTimerFromLastSample()
+        scheduleNextSample()
 
         // Re-arm automatically whenever the interval setting changes while tracking.
         intervalCancellable = NotificationCenter.default
@@ -203,70 +209,36 @@ final class ExposureTracker: NSObject, ObservableObject {
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in
                 guard let self, self.isTracking else { return }
-                let newInterval = UserDefaults.standard.double(forKey: SettingsKeys.sampleIntervalSeconds)
-                    .nonZero(defaultValue: Defaults.sampleIntervalSeconds)
-                let currentInterval = self.repeatTimer?.timeInterval ?? 0
-                guard abs(currentInterval - newInterval) > 0.5 else { return }
-                self.scheduleTimerFromLastSample()
+                self.scheduleNextSample()
                 self.scheduleBackgroundRefresh()
             }
     }
 
-    /// Computes how long until the next sample is due (based on last sample time) and
-    /// fires a one-shot timer for that remaining delay, then switches to a repeating timer.
-    private func scheduleTimerFromLastSample() {
-        delayTimer?.invalidate(); delayTimer = nil
-        repeatTimer?.invalidate(); repeatTimer = nil
+    /// Schedules one non-repeating timer that fires when the next sample is due,
+    /// computed from lastSampleDate. Called again after each successful sample.
+    func scheduleNextSample() {
+        sampleTimer?.invalidate()
+        sampleTimer = nil
 
         let interval = UserDefaults.standard.double(forKey: SettingsKeys.sampleIntervalSeconds)
             .nonZero(defaultValue: Defaults.sampleIntervalSeconds)
         let elapsed = lastSampleDate.map { Date().timeIntervalSince($0) } ?? interval
-        let delay = max(0, interval - elapsed)
+        // At least 0.5 s to ensure modelContext is set before the first sample fires.
+        let delay = max(0.5, interval - elapsed)
 
-        if delay < 1 {
-            // Already overdue — defer by one runloop cycle to ensure modelContext is set,
-            // then sample and start the repeating cycle.
-            let t = Timer(timeInterval: 0.5, repeats: false) { [weak self] _ in
-                Task { @MainActor in
-                    guard let self else { return }
-                    self.delayTimer = nil
-                    self.requestOneShotLocation(forced: false)
-                    self.startRepeatTimer(interval: interval)
-                }
-            }
-            RunLoop.main.add(t, forMode: .common)
-            delayTimer = t
-        } else {
-            // Wait out the remaining portion of the current interval.
-            let t = Timer(timeInterval: delay, repeats: false) { [weak self] _ in
-                Task { @MainActor in
-                    guard let self else { return }
-                    self.delayTimer = nil
-                    self.requestOneShotLocation(forced: false)
-                    let nextInterval = UserDefaults.standard.double(forKey: SettingsKeys.sampleIntervalSeconds)
-                        .nonZero(defaultValue: Defaults.sampleIntervalSeconds)
-                    self.startRepeatTimer(interval: nextInterval)
-                }
-            }
-            RunLoop.main.add(t, forMode: .common)
-            delayTimer = t
-        }
-    }
-
-    private func startRepeatTimer(interval: TimeInterval) {
-        repeatTimer?.invalidate()
-        let t = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
+        let t = Timer(timeInterval: delay, repeats: false) { [weak self] _ in
             Task { @MainActor in
+                self?.sampleTimer = nil
                 self?.requestOneShotLocation(forced: false)
             }
         }
         RunLoop.main.add(t, forMode: .common)
-        repeatTimer = t
+        sampleTimer = t
     }
 
     private func stopSampleTimer() {
-        delayTimer?.invalidate(); delayTimer = nil
-        repeatTimer?.invalidate(); repeatTimer = nil
+        sampleTimer?.invalidate()
+        sampleTimer = nil
         intervalCancellable = nil
     }
 
@@ -295,13 +267,13 @@ final class ExposureTracker: NSObject, ObservableObject {
 
         if let location = locationManager.location {
             Task {
-                await process(location: location, forced: true)
+                await process(location: location, forced: false)
                 task.setTaskCompleted(success: true)
             }
         } else {
             // No cached location — request a one-shot precise fix
             pendingBGTask = task
-            requestOneShotLocation(forced: true)
+            requestOneShotLocation(forced: false)
         }
     }
 

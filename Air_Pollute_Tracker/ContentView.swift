@@ -142,48 +142,44 @@ struct ContentView: View {
             }
 
             VStack(alignment: .leading, spacing: 6) {
-                Text("Alert threshold")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                HStack(spacing: 0) {
-                    Button {
-                        let next = (alertThreshold - 0.1).rounded(toPlaces: 1)
-                        alertThreshold = max(next, 0.1)
-                        ExposureAlertService.shared.resetCooldown()
-                    } label: {
-                        Image(systemName: "minus")
-                            .frame(width: 44, height: 36)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.bordered)
-
+                HStack {
+                    Text("Alert threshold")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    Spacer()
                     Text(alertThreshold.formattedPM25)
-                        .font(.body.monospacedDigit())
-                        .frame(minWidth: 100)
-                        .multilineTextAlignment(.center)
-
-                    Button {
-                        let next = (alertThreshold + 0.1).rounded(toPlaces: 1)
-                        alertThreshold = min(next, 150)
-                        ExposureAlertService.shared.resetCooldown()
-                    } label: {
-                        Image(systemName: "plus")
-                            .frame(width: 44, height: 36)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.bordered)
+                        .font(.subheadline.monospacedDigit().weight(.semibold))
                 }
-                Text("Default is 35.5 ug/m3, near the PM2.5 unhealthy-for-sensitive-groups threshold. Changing the threshold resets the alert cooldown.")
+                Slider(
+                    value: $alertThreshold,
+                    in: 0.1...150,
+                    step: 0.1,
+                    onEditingChanged: { editing in
+                        if !editing {
+                            alertThreshold = alertThreshold.rounded(toPlaces: 1)
+                            ExposureAlertService.shared.resetCooldown()
+                        }
+                    }
+                )
+                Text("Default is 35.5 ug/m3, near the PM2.5 unhealthy-for-sensitive-groups threshold. Releasing the slider resets the alert cooldown.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
 
-            Picker("Sampling interval", selection: $sampleIntervalSeconds) {
-                Text("15 min").tag(15.0 * 60.0)
-                Text("30 min").tag(30.0 * 60.0)
-                Text("60 min").tag(60.0 * 60.0)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Sampling interval")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                Picker("Sampling interval", selection: $sampleIntervalSeconds) {
+                    Text("15 min").tag(15.0 * 60.0)
+                    Text("30 min").tag(30.0 * 60.0)
+                    Text("60 min").tag(60.0 * 60.0)
+                }
+                .pickerStyle(.segmented)
+                Text("How often a new PM2.5 reading is taken while tracking is on. This is separate from the report window below.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
             }
-            .pickerStyle(.segmented)
 
             VStack(alignment: .leading, spacing: 4) {
                 Text("Tracking window")
