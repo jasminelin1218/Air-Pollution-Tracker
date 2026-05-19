@@ -27,6 +27,7 @@ struct ContentView: View {
     @State private var isOpenAQAPIKeyVisible = false
     @State private var trackingExportShareItem: TrackingExportShareItem?
     @State private var trackingExportErrorMessage: String?
+    @State private var isExportingHistory = false
 
     private var tracker: ExposureTracker { sharedTracker }
 
@@ -54,12 +55,19 @@ struct ContentView: View {
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
-                        exportTrackingHistoryToShare()
+                        Task { await exportTrackingHistoryToShare() }
                     } label: {
-                        Label("Export history", systemImage: "square.and.arrow.up")
+                        if isExportingHistory {
+                            ProgressView()
+                                .accessibilityLabel("Preparing export")
+                        } else {
+                            Label("Export history", systemImage: "square.and.arrow.up")
+                        }
                     }
-                    .disabled(samples.isEmpty)
-                    .accessibilityHint("Exports all stored samples as a spreadsheet file from oldest to newest.")
+                    .disabled(samples.isEmpty || isExportingHistory)
+                    .accessibilityHint(
+                        "Exports all stored samples as a spreadsheet file with the latest samples first. Adds Pacific time and reverse-geocoded city and country columns."
+                    )
                 }
             }
             .onAppear {
@@ -113,11 +121,15 @@ struct ContentView: View {
         }
     }
 
-    /// Read-only export of every sample currently in the store (oldest → newest). Does not affect tracking.
-    private func exportTrackingHistoryToShare() {
-        let sortedAscending = samples.sorted { $0.timestamp < $1.timestamp }
+    /// Read-only export of every sample currently in the store (**newest first** in the CSV). Does not affect tracking.
+    /// Reverse-geocodes distinct coordinates (may take time for large histories).
+    private func exportTrackingHistoryToShare() async {
+        guard !samples.isEmpty else { return }
+        isExportingHistory = true
+        defer { isExportingHistory = false }
+        let newestFirst = samples.sorted { $0.timestamp > $1.timestamp }
         do {
-            let url = try TrackingHistoryCSVExport.writeTempCSVFile(allSamplesSortedAscending: sortedAscending)
+            let url = try await TrackingHistoryCSVExport.writeTempCSVFile(samplesOrderedNewestFirst: newestFirst)
             trackingExportShareItem = TrackingExportShareItem(url: url)
         } catch {
             trackingExportErrorMessage = error.localizedDescription
@@ -464,15 +476,37 @@ struct WeeklyReportView: View {
 
                 if !summary.dailyBreakdown.isEmpty {
                     VStack(alignment: .leading, spacing: 6) {
-                        Chart(summary.dailyBreakdown) { day in
-                            BarMark(
-                                x: .value("Day", day.date, unit: .day),
-                                y: .value("Average PM2.5", day.averagePM25)
-                            )
+                        let dailyMaxY = max(
+                            summary.dailyBreakdown.map(\.averagePM25).max() ?? 0,
+                            threshold
+                        ) * 1.2
+
+                        Chart {
+                            ForEach(summary.dailyBreakdown) { day in
+                                LineMark(
+                                    x: .value("Day", day.date, unit: .day),
+                                    y: .value("Average PM2.5", day.averagePM25)
+                                )
+                                .interpolationMethod(.catmullRom)
+                                PointMark(
+                                    x: .value("Day", day.date, unit: .day),
+                                    y: .value("Average PM2.5", day.averagePM25)
+                                )
+                                .symbolSize(72)
+                            }
                         }
                         .frame(height: 140)
+                        .chartYScale(domain: 0...dailyMaxY)
+                        .chartXAxis {
+                            AxisMarks(values: .automatic(desiredCount: min(summary.dailyBreakdown.count + 1, 6))) { _ in
+                                AxisGridLine()
+                                AxisTick()
+                                AxisValueLabel(format: .dateTime.month(.abbreviated).day())
+                                    .font(.caption2)
+                            }
+                        }
 
-                        Text("Each bar is the average PM2.5 for all samples on that calendar day within your tracking window.")
+                        Text("Each point is the average PM2.5 for all samples on that calendar day within your tracking window.")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                     }

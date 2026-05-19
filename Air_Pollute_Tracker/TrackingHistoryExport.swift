@@ -1,3 +1,4 @@
+import CoreLocation
 import Foundation
 import SwiftUI
 import UIKit
@@ -11,6 +12,22 @@ enum TrackingHistoryCSVExport {
         f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         f.timeZone = TimeZone(secondsFromGMT: 0)
         return f
+    }()
+
+    /// US Pacific wall clock (PST / PDT per DST rules).
+    private static let pacificFormatter: DateFormatter = {
+        let d = DateFormatter()
+        d.locale = Locale(identifier: "en_US_POSIX")
+        d.timeZone = TimeZone(identifier: "America/Los_Angeles")
+        d.dateFormat = "yyyy-MM-dd HH:mm:ss zzz"
+        return d
+    }()
+
+    private static let localSampleFormatter: DateFormatter = {
+        let d = DateFormatter()
+        d.locale = Locale(identifier: "en_US_POSIX")
+        d.dateFormat = "yyyy-MM-dd HH:mm:ss zzz"
+        return d
     }()
 
     private static let fileNameDate: DateFormatter = {
@@ -29,10 +46,55 @@ enum TrackingHistoryCSVExport {
         return field
     }
 
-    static func csvString(from samples: [ExposureSample]) -> String {
+    /// Human-readable `(City, Country)` using reverse-geocode fields when present.
+    private static func bracketPlace(from placemark: CLPlacemark?) -> String {
+        guard let placemark else {
+            return "(unknown location)"
+        }
+        let city =
+            placemark.locality
+            ?? placemark.subAdministrativeArea
+            ?? placemark.administrativeArea
+            ?? "Unknown place"
+        let countryPart = countryLabel(for: placemark)
+        if countryPart.isEmpty {
+            return "(\(city))"
+        }
+        return "(\(city), \(countryPart))"
+    }
+
+    private static func countryLabel(for placemark: CLPlacemark) -> String {
+        if let code = placemark.isoCountryCode?.uppercased() {
+            switch code {
+            case "US":
+                return "USA"
+            case "GB":
+                return "UK"
+            default:
+                return Locale(identifier: "en_US_POSIX").localizedString(forRegionCode: code)
+                    ?? placemark.country
+                    ?? code
+            }
+        }
+        return placemark.country ?? ""
+    }
+
+    /// Sample instant in the placemark’s timezone when available; suffix is `(City, Country)`.
+    private static func localTimeAndPlaceColumn(timestamp: Date, placemark: CLPlacemark?) -> String {
+        localSampleFormatter.timeZone = placemark?.timeZone ?? TimeZone(secondsFromGMT: 0)
+        let timePart = localSampleFormatter.string(from: timestamp)
+        return "\(timePart) \(bracketPlace(from: placemark))"
+    }
+
+    /// Pass samples **newest first** (latest row immediately below the header).
+    /// Reverse-geocodes sequentially (Apple allows one `CLGeocoder` request at a time); caches rounded coordinates.
+    @MainActor
+    static func csvString(samplesOrderedNewestFirst samples: [ExposureSample]) async -> String {
         let header = [
             "Sample_ID",
             "Timestamp_UTC",
+            "Timestamp_Pacific",
+            "Local_Time_And_Place",
             "Latitude",
             "Longitude",
             "Horizontal_Accuracy_m",
@@ -45,10 +107,14 @@ enum TrackingHistoryCSVExport {
         var lines: [String] = [header]
         lines.reserveCapacity(samples.count + 1)
 
+        let cache = ExportReverseGeocodeCache()
         for s in samples {
+            let placemark = await cache.placemark(latitude: s.latitude, longitude: s.longitude)
             let row: [String] = [
                 csvEscaped(s.id.uuidString),
                 csvEscaped(isoTimestamp.string(from: s.timestamp)),
+                csvEscaped(pacificFormatter.string(from: s.timestamp)),
+                csvEscaped(localTimeAndPlaceColumn(timestamp: s.timestamp, placemark: placemark)),
                 String(s.latitude),
                 String(s.longitude),
                 String(s.horizontalAccuracy),
@@ -64,8 +130,10 @@ enum TrackingHistoryCSVExport {
     }
 
     /// UTF-8 with BOM so Excel recognizes Unicode station names; written to a unique temp file.
-    static func writeTempCSVFile(allSamplesSortedAscending: [ExposureSample]) throws -> URL {
-        let csv = csvString(from: allSamplesSortedAscending)
+    /// Pass samples **newest first**. Performs reverse geocoding (may take a while for many distinct locations).
+    @MainActor
+    static func writeTempCSVFile(samplesOrderedNewestFirst samples: [ExposureSample]) async throws -> URL {
+        let csv = await csvString(samplesOrderedNewestFirst: samples)
         let bom = "\u{FEFF}"
         guard let data = (bom + csv).data(using: .utf8) else {
             throw TrackingHistoryExportError.encodingFailed
@@ -75,6 +143,37 @@ enum TrackingHistoryCSVExport {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(fileName)
         try data.write(to: url, options: .atomic)
         return url
+    }
+}
+
+// MARK: - Reverse geocode (export only)
+
+/// One geocoder instance; Apple recommends only one reverse request at a time.
+@MainActor
+private final class ExportReverseGeocodeCache {
+    private let geocoder = CLGeocoder()
+    /// Successful lookups only (same rounded coordinate → reuse placemark).
+    private var cache: [String: CLPlacemark] = [:]
+
+    func placemark(latitude: Double, longitude: Double) async -> CLPlacemark? {
+        let key = "\(latitude.rounded(toPlaces: 4)),\(longitude.rounded(toPlaces: 4))"
+        if let cached = cache[key] {
+            return cached
+        }
+        let location = CLLocation(latitude: latitude, longitude: longitude)
+        guard let placemark = await reverseGeocode(location) else {
+            return nil
+        }
+        cache[key] = placemark
+        return placemark
+    }
+
+    private func reverseGeocode(_ location: CLLocation) async -> CLPlacemark? {
+        await withCheckedContinuation { (continuation: CheckedContinuation<CLPlacemark?, Never>) in
+            geocoder.reverseGeocodeLocation(location) { placemarks, _ in
+                continuation.resume(returning: placemarks?.first)
+            }
+        }
     }
 }
 

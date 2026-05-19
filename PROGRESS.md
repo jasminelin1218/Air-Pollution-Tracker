@@ -176,13 +176,14 @@ The chart **callout** for a selected sample only had **station names** (from `so
 Ability to **share** all stored exposure samples in a spreadsheet-friendly form **without stopping** tracking or blocking sampling timers.
 
 ### Solution
-- **Toolbar** trailing: **Export history** (`square.and.arrow.up`). **Read-only**: uses `@Query` samples, sorts **oldest → newest**, writes a **temporary `.csv`**; presents **`UIActivityViewController`** (`ActivityView`). No calls into `ExposureTracker` start/stop flow.
+- **Toolbar** trailing: **Export history** (`square.and.arrow.up`). **Read-only**: uses `@Query` samples, sorts **newest → oldest** (latest rows directly under the header), writes a **temporary `.csv`**; presents **`UIActivityViewController`** (`ActivityView`). No calls into `ExposureTracker` start/stop flow. Shows a **spinner** while building the file (reverse geocoding can take time).
 - **CSV** opens directly in Excel: **UTF‑8 BOM**, CRLF rows, RFC-style quoted fields where needed.
-- Columns: `Sample_ID`, `Timestamp_UTC` (ISO 8601), lat/lon, horizontal accuracy, PM2.5, station count, `Source_Stations`, `Contributor_Snapshots_JSON`.
+- Columns include **`Timestamp_Pacific`** (`America/Los_Angeles`, PST/PDT per DST), **`Local_Time_And_Place`** (sample instant in **`CLPlacemark.timeZone`** when present, plus **`(City, Country)`** from reverse geocode—e.g. `(La Jolla, USA)` with **`US` → `USA`**), plus **`Timestamp_UTC`**, coordinates, accuracy, PM2.5, station metadata, **`Contributor_Snapshots_JSON`**.
+- Reverse geocode uses **`CLGeocoder`** sequentially (Apple’s one-at-a-time guidance); coordinates rounded to **4** decimals reuse placemarks for repeated spots.
 - **Retention**: export includes **everything still in SwiftData** (samples already pruned by retention policy are absent—same bounds as §3 prune).
 
 ### File
-`TrackingHistoryExport.swift` (CSV builder + share wrapper); wiring in `ContentView.swift`.
+`TrackingHistoryExport.swift` (CSV builder, **`CLGeocoder`** cache for export, share wrapper); wiring in `ContentView.swift`.
 
 ---
 
@@ -191,14 +192,14 @@ Ability to **share** all stored exposure samples in a spreadsheet-friendly form 
 | File | Main changes |
 |------|----------------|
 | `ExposureTracker.swift` | Timer-based sampling, forced BG samples, prune by `windowInterval`, 10 km radius, nearest-station status, modelContext retry; **`contributorSnapshotsJSON` encoding** |
-| `ContentView.swift` | 1 h window, threshold controls, secure API key, chart captions, removed radius picker; **`SampleCallout` snapshot rows**; **export toolbar + share sheet**; **overnight sampling tips** (Always / Background App Refresh) |
+| `ContentView.swift` | 1 h window, threshold controls, secure API key, chart captions, removed radius picker; **`SampleCallout` snapshot rows**; **export toolbar + async export spinner + share sheet**; **overnight sampling tips** (Always / Background App Refresh) |
 | `AirQualityModels.swift` | `TrackingDuration`, `windowInterval`; **`ContributingStationSnapshot`**, **`contributorSnapshotsJSON`** |
 | `WeeklyExposureReport.swift` | Dynamic `maxGapSeconds` (via caller) |
 | `ExposureAlertService.swift` | Auth check, time-sensitive, custom sound, rounded compare, `resetCooldown()` |
 | `Air_Pollute_TrackerApp.swift` | Notification delegate + launch authorization |
 | `OpenAQClient.swift` | limit 50, no invalid `order_by`, radius param only |
 | `AirQualityFormatting.swift` | `Int.nonZero`, `rounded(toPlaces:)`, **`formattedStationDistance`** |
-| `TrackingHistoryExport.swift` | **CSV export + `ActivityView`** |
+| `TrackingHistoryExport.swift` | **CSV export** (Pacific + local/geocode columns), **`ActivityView`**, reverse-geocode cache |
 | `ding_ding.caf` | Notification sound asset |
 
 ---
@@ -208,7 +209,7 @@ Ability to **share** all stored exposure samples in a spreadsheet-friendly form 
 1. User starts **tracking** → periodic samples at chosen interval (15 / 30 / 60 min).
 2. Each sample: GPS → OpenAQ within **10 km** → **IDW** (up to 5 nearest PM2.5 stations) → save **`ExposureSample`** (including **`contributorSnapshotsJSON`** when available).
 3. UI: live PM2.5, **Recent Samples**, rolling **report** (TWA, peak, charts) for 1 h / 1 d / 7 d; chart callout shows **per-station PM2.5 and distance** for new samples (**name-only** bullets for legacy rows).
-4. **Export history** writes a CSV of **all retained samples** and opens the share sheet (**does not** pause tracking).
+4. **Export history** writes a CSV of **all retained samples** (**most recent first**), adds **Pacific** and **reverse-geocoded local time + city/country** columns, and opens the share sheet (**does not** pause tracking).
 5. Alerts if rounded PM2.5 ≥ threshold (45 min cooldown; cooldown resets when threshold is changed via ±).
 
 ---
@@ -221,3 +222,4 @@ Ability to **share** all stored exposure samples in a spreadsheet-friendly form 
 - **Foreground-only** tracking if location permission is “When In Use” only.
 - **BGAppRefreshTask** timing is controlled by iOS, not exact intervals.
 - **CSV export** is not a proprietary `.xlsx`; Excel opens CSV natively. Samples deleted by **retention pruning** cannot be exported.
+- **`Local_Time_And_Place`** depends on Apple reverse geocode (network); failures or ambiguous areas may show **`(unknown location)`**, with UTC formatting when **`CLPlacemark.timeZone`** is missing.
