@@ -202,11 +202,30 @@ final class ExposureTracker: NSObject, ObservableObject {
                 near: Coordinate(latitude: location.coordinate.latitude, longitude: location.coordinate.longitude),
                 radiusMeters: Defaults.searchRadiusMeters
             )
+            let userCoord = Coordinate(
+                latitude: location.coordinate.latitude,
+                longitude: location.coordinate.longitude
+            )
             let result = try IDWInterpolator.interpolate(
-                at: Coordinate(latitude: location.coordinate.latitude, longitude: location.coordinate.longitude),
+                at: userCoord,
                 readings: readings,
                 nearestCount: min(5, max(3, readings.count))
             )
+
+            let snapshots = result.usedReadings.map { reading in
+                ContributingStationSnapshot(
+                    name: reading.name,
+                    pm25: reading.pm25,
+                    distanceMeters: IDWInterpolator.haversineMeters(
+                        from: userCoord,
+                        to: Coordinate(latitude: reading.latitude, longitude: reading.longitude)
+                    )
+                )
+            }
+            let contributorSnapshotsJSON: String = {
+                guard let data = try? JSONEncoder().encode(snapshots) else { return "" }
+                return String(data: data, encoding: .utf8) ?? ""
+            }()
 
             let sample = ExposureSample(
                 timestamp: Date(),
@@ -215,7 +234,8 @@ final class ExposureTracker: NSObject, ObservableObject {
                 horizontalAccuracy: location.horizontalAccuracy,
                 pm25: result.pm25,
                 stationCount: result.usedReadings.count,
-                sourceSummary: result.usedReadings.map(\.name).joined(separator: ", ")
+                sourceSummary: result.usedReadings.map(\.name).joined(separator: ", "),
+                contributorSnapshotsJSON: contributorSnapshotsJSON
             )
             modelContext.insert(sample)
             try modelContext.save()

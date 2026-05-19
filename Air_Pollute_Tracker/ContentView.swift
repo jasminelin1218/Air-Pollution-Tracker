@@ -10,6 +10,11 @@ import SwiftData
 import Charts
 import CoreLocation
 
+private struct TrackingExportShareItem: Identifiable {
+    let id = UUID()
+    let url: URL
+}
+
 struct ContentView: View {
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \ExposureSample.timestamp, order: .reverse) private var samples: [ExposureSample]
@@ -20,6 +25,8 @@ struct ContentView: View {
     @AppStorage(SettingsKeys.trackingDays) private var trackingDays = TrackingDuration.sevenDays.rawValue
     @Environment(\.scenePhase) private var scenePhase
     @State private var isOpenAQAPIKeyVisible = false
+    @State private var trackingExportShareItem: TrackingExportShareItem?
+    @State private var trackingExportErrorMessage: String?
 
     private var tracker: ExposureTracker { sharedTracker }
 
@@ -44,6 +51,17 @@ struct ContentView: View {
                 .padding()
             }
             .navigationTitle("Air Exposure")
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        exportTrackingHistoryToShare()
+                    } label: {
+                        Label("Export history", systemImage: "square.and.arrow.up")
+                    }
+                    .disabled(samples.isEmpty)
+                    .accessibilityHint("Exports all stored samples as a spreadsheet file from oldest to newest.")
+                }
+            }
             .onAppear {
                 tracker.configure(modelContext: modelContext)
             }
@@ -74,6 +92,35 @@ struct ContentView: View {
                         }
                     }
             }
+        }
+        .sheet(item: $trackingExportShareItem) { item in
+            ActivityView(activityItems: [item.url])
+                .ignoresSafeArea()
+                .onDisappear {
+                    try? FileManager.default.removeItem(at: item.url)
+                }
+        }
+        .alert(
+            "Export failed",
+            isPresented: Binding(
+                get: { trackingExportErrorMessage != nil },
+                set: { if !$0 { trackingExportErrorMessage = nil } }
+            )
+        ) {
+            Button("OK", role: .cancel) { trackingExportErrorMessage = nil }
+        } message: {
+            Text(trackingExportErrorMessage ?? "")
+        }
+    }
+
+    /// Read-only export of every sample currently in the store (oldest → newest). Does not affect tracking.
+    private func exportTrackingHistoryToShare() {
+        let sortedAscending = samples.sorted { $0.timestamp < $1.timestamp }
+        do {
+            let url = try TrackingHistoryCSVExport.writeTempCSVFile(allSamplesSortedAscending: sortedAscending)
+            trackingExportShareItem = TrackingExportShareItem(url: url)
+        } catch {
+            trackingExportErrorMessage = error.localizedDescription
         }
     }
 
@@ -516,6 +563,20 @@ private struct SampleCallout: View {
         sample.sourceSummary.components(separatedBy: ", ").filter { !$0.isEmpty }
     }
 
+    /// Non-empty only when JSON decodes to at least one snapshot (new samples).
+    private var contributorSnapshots: [ContributingStationSnapshot] {
+        guard !sample.contributorSnapshotsJSON.isEmpty,
+              let data = sample.contributorSnapshotsJSON.data(using: .utf8),
+              let decoded = try? JSONDecoder().decode([ContributingStationSnapshot].self, from: data),
+              !decoded.isEmpty
+        else { return [] }
+        return decoded
+    }
+
+    private var showContributors: Bool {
+        !contributorSnapshots.isEmpty || !stations.isEmpty
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(sample.timestamp.shortDateTimeString)
@@ -523,21 +584,43 @@ private struct SampleCallout: View {
                 .foregroundStyle(.secondary)
             Text(sample.pm25.formattedPM25)
                 .font(.subheadline.weight(.bold))
-            if !stations.isEmpty {
+            if showContributors {
                 Divider()
                 Text("\(sample.stationCount) contributing station\(sample.stationCount == 1 ? "" : "s"):")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
-                ForEach(stations.prefix(5), id: \.self) { station in
-                    Text("• \(station)")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-                if stations.count > 5 {
-                    Text("+ \(stations.count - 5) more")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
+                if !contributorSnapshots.isEmpty {
+                    ForEach(Array(contributorSnapshots.prefix(5).enumerated()), id: \.offset) { _, snap in
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            Text(snap.name)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(2)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            Text("\(snap.pm25.formattedPM25), \(snap.distanceMeters.formattedStationDistance)")
+                                .font(.caption2)
+                                .monospacedDigit()
+                                .foregroundStyle(.secondary)
+                                .multilineTextAlignment(.trailing)
+                        }
+                    }
+                    if contributorSnapshots.count > 5 {
+                        Text("+ \(contributorSnapshots.count - 5) more")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    }
+                } else {
+                    ForEach(stations.prefix(5), id: \.self) { station in
+                        Text("• \(station)")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    if stations.count > 5 {
+                        Text("+ \(stations.count - 5) more")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    }
                 }
             }
         }

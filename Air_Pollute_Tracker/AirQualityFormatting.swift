@@ -29,6 +29,15 @@ extension Double {
         let m = Int(minutes.rounded())
         return "\(m) minutes"
     }
+
+    /// Formats haversine distance to the station (meters → m or km).
+    var formattedStationDistance: String {
+        if self < 1_000 {
+            return formatted(.number.precision(.fractionLength(0))) + " m"
+        }
+        let km = self / 1_000
+        return km.formatted(.number.precision(.fractionLength(1))) + " km"
+    }
 }
 
 extension Int {

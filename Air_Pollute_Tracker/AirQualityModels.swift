@@ -23,6 +23,13 @@ struct Coordinate: Hashable {
     let longitude: Double
 }
 
+/// Stored per contributing station when saving an exposure sample (for chart callouts).
+struct ContributingStationSnapshot: Codable, Equatable {
+    var name: String
+    var pm25: Double
+    var distanceMeters: Double
+}
+
 @Model
 final class ExposureSample {
     var id: UUID
@@ -33,6 +40,8 @@ final class ExposureSample {
     var pm25: Double
     var stationCount: Int
     var sourceSummary: String
+    /// JSON array of `ContributingStationSnapshot` (nearest-first). Empty for samples saved before this field existed.
+    var contributorSnapshotsJSON: String = ""
 
     init(
         id: UUID = UUID(),
@@ -42,7 +51,8 @@ final class ExposureSample {
         horizontalAccuracy: Double,
         pm25: Double,
         stationCount: Int,
-        sourceSummary: String
+        sourceSummary: String,
+        contributorSnapshotsJSON: String = ""
     ) {
         self.id = id
         self.timestamp = timestamp
@@ -52,6 +62,7 @@ final class ExposureSample {
         self.pm25 = pm25
         self.stationCount = stationCount
         self.sourceSummary = sourceSummary
+        self.contributorSnapshotsJSON = contributorSnapshotsJSON
     }
 }
 
