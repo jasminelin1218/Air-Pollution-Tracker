@@ -26,11 +26,21 @@ struct DailyExposureSummary: Identifiable {
     let sampleCount: Int
 }
 
+/// Snapshot shown when the user stops tracking (session-scoped metrics).
+struct StopTrackingReport: Identifiable {
+    let id = UUID()
+    let sessionStart: Date
+    let sessionEnd: Date
+    let summary: WeeklyExposureSummary
+}
+
 enum WeeklyExposureReport {
+    /// - Parameter referenceEndDate: When set (e.g. session end), forward-exposure time after the last sample is capped to this instant instead of "now".
     static func summarize(
         samples: [ExposureSample],
         threshold: Double,
-        maxGapSeconds: Double = Defaults.sampleIntervalSeconds * 2
+        maxGapSeconds: Double = Defaults.sampleIntervalSeconds * 2,
+        referenceEndDate: Date? = nil
     ) -> WeeklyExposureSummary {
         let ordered = samples.sorted { $0.timestamp < $1.timestamp }
         guard !ordered.isEmpty else {
@@ -40,7 +50,7 @@ enum WeeklyExposureReport {
         var weightedSum = 0.0
         var trackedSeconds = 0.0
         var highExposureSeconds = 0.0
-        let now = Date()
+        let now = referenceEndDate ?? Date()
 
         for index in ordered.indices {
             let sample = ordered[index]

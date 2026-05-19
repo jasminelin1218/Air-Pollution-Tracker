@@ -63,8 +63,12 @@ enum SettingsKeys {
 }
 
 enum TrackingDuration: Int, CaseIterable, Identifiable {
+    /// Raw values are stable for `UserDefaults` / `@AppStorage`; do not reorder existing raw IDs.
     case oneHour = 0
+    case sixHours = 6
     case oneDay = 1
+    case twoDays = 2
+    case fourDays = 4
     case sevenDays = 7
 
     var id: Int { rawValue }
@@ -72,7 +76,10 @@ enum TrackingDuration: Int, CaseIterable, Identifiable {
     var label: String {
         switch self {
         case .oneHour: return "1 Hour"
+        case .sixHours: return "6 Hours"
         case .oneDay: return "1 Day"
+        case .twoDays: return "2 Days"
+        case .fourDays: return "4 Days"
         case .sevenDays: return "7 Days"
         }
     }
@@ -80,7 +87,10 @@ enum TrackingDuration: Int, CaseIterable, Identifiable {
     var reportTitle: String {
         switch self {
         case .oneHour: return "Hourly Exposure Report"
+        case .sixHours: return "6-Hour Exposure Report"
         case .oneDay: return "Daily Exposure Report"
+        case .twoDays: return "2-Day Exposure Report"
+        case .fourDays: return "4-Day Exposure Report"
         case .sevenDays: return "Weekly Exposure Report"
         }
     }
@@ -88,7 +98,10 @@ enum TrackingDuration: Int, CaseIterable, Identifiable {
     var reportWindowDescription: String {
         switch self {
         case .oneHour: return "one-hour"
+        case .sixHours: return "six-hour"
         case .oneDay: return "24-hour"
+        case .twoDays: return "two-day"
+        case .fourDays: return "four-day"
         case .sevenDays: return "seven-day"
         }
     }
@@ -96,7 +109,10 @@ enum TrackingDuration: Int, CaseIterable, Identifiable {
     var windowInterval: TimeInterval {
         switch self {
         case .oneHour: return 60.0 * 60.0
+        case .sixHours: return 6.0 * 60.0 * 60.0
         case .oneDay: return 24.0 * 60.0 * 60.0
+        case .twoDays: return 2.0 * 24.0 * 60.0 * 60.0
+        case .fourDays: return 4.0 * 24.0 * 60.0 * 60.0
         case .sevenDays: return 7.0 * 24.0 * 60.0 * 60.0
         }
     }

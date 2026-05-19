@@ -8,6 +8,7 @@
 import SwiftUI
 import SwiftData
 import Charts
+import CoreLocation
 
 struct ContentView: View {
     @Environment(\.modelContext) private var modelContext
@@ -55,6 +56,23 @@ struct ContentView: View {
                 tracker.appWillEnterForeground()
             default:
                 break
+            }
+        }
+        .sheet(item: Binding(
+            get: { sharedTracker.stopReportSheet },
+            set: { sharedTracker.stopReportSheet = $0 }
+        )) { report in
+            NavigationStack {
+                StopTrackingReportSheetContent(report: report)
+                    .navigationTitle("Session report")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("Done") {
+                                sharedTracker.stopReportSheet = nil
+                            }
+                        }
+                    }
             }
         }
     }
@@ -110,8 +128,33 @@ struct ContentView: View {
                     ProgressView()
                 }
             }
+
+            if tracker.isTracking {
+                overnightTrackingTips
+            }
         }
         .cardStyle()
+    }
+
+    @ViewBuilder
+    private var overnightTrackingTips: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Reliable overnight sampling")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            if tracker.authorizationStatus != .authorizedAlways {
+                Text("Use location permission Always (Settings → Air Pollute Tracker → Location). “While Using” does not run in the background.")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+            }
+            Text("Turn on Settings → General → Background App Refresh for this app. Don’t swipe the app away from the app switcher.")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+            Text("iOS may still stretch intervals in Low Power Mode or with a very low battery. The blue bar or pill means location is active.")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+        }
+        .padding(.top, 4)
     }
 
     private var settingsCard: some View {
@@ -201,8 +244,8 @@ struct ContentView: View {
                         Text(duration.label).tag(duration.rawValue)
                     }
                 }
-                .pickerStyle(.segmented)
-                Text("How far back the report and recent samples look.")
+                .pickerStyle(.menu)
+                Text("How far back the report and recent samples list look. Raw samples are kept at least 7 days so short windows do not delete older data.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
@@ -266,11 +309,26 @@ struct WeeklyReportView: View {
     }
 
     /// Width of the visible x-domain when the chart is scrollable (in seconds).
+    /// Matches the 6-hour tracking window chart (¼ of 6 h ≈ 1.5 h visible) so dot spacing
+    /// is the same for 1-hour, 6-hour, and multi-day windows. Capped by the current window
+    /// when it is shorter (e.g. 1-hour mode shows the full hour).
     private var visibleDomainSeconds: Int {
-        switch duration {
-        case .sevenDays: return 86_400        // show ~1 day at a time
-        case .oneDay:    return 6 * 3_600     // show ~6 hours at a time
-        case .oneHour:   return 3_600
+        let sixHourQuarter = max(Int(TrackingDuration.sixHours.windowInterval) / 4, 900)
+        let window = Int(duration.windowInterval)
+        return min(sixHourQuarter, window)
+    }
+
+    /// Fewer ticks keeps abbreviated date labels from crowding on narrow phones.
+    private var axisTickCount: Int {
+        duration.windowInterval < 24 * 60 * 60 ? 5 : 4
+    }
+
+    /// X-axis label density matches how much time is visible while scrolling.
+    private var axisDateFormat: Date.FormatStyle {
+        if visibleDomainSeconds > 86_400 {
+            .dateTime.month(.abbreviated).day()
+        } else {
+            .dateTime.hour().minute()
         }
     }
 
@@ -311,7 +369,13 @@ struct WeeklyReportView: View {
                                 x: .value("Time", sample.timestamp),
                                 y: .value("PM2.5", sample.pm25)
                             )
-                            .symbolSize(selectedSample?.id == sample.id ? 160 : 40)
+                            .symbolSize(220)
+                            .foregroundStyle(.clear)
+                            PointMark(
+                                x: .value("Time", sample.timestamp),
+                                y: .value("PM2.5", sample.pm25)
+                            )
+                            .symbolSize(selectedSample?.id == sample.id ? 200 : 120)
                         }
                         // EPA breakpoint reference lines
                         RuleMark(y: .value("Good", 12.0))
@@ -328,25 +392,25 @@ struct WeeklyReportView: View {
                     .chartScrollableAxes(.horizontal)
                     .chartXVisibleDomain(length: visibleDomainSeconds)
                     .chartYScale(domain: 0...maxY)
-                    .chartXSelection(value: $selectedDate)
-                    .chartOverlay { proxy in
-                        GeometryReader { geo in
-                            if let nearest = selectedSample,
-                               let xPos = proxy.position(forX: nearest.timestamp),
-                               let yPos = proxy.position(forY: nearest.pm25) {
-                                let clampedX = min(max(xPos, 100), geo.size.width - 100)
-                                let calloutY = yPos > geo.size.height * 0.55
-                                    ? yPos - 98 : yPos + 78
-                                SampleCallout(sample: nearest)
-                                    .position(x: clampedX, y: calloutY)
-                                    .allowsHitTesting(false)
-                            }
+                    .chartXAxis {
+                        AxisMarks(values: .automatic(desiredCount: axisTickCount)) { _ in
+                            AxisGridLine()
+                            AxisTick()
+                            AxisValueLabel(format: axisDateFormat)
+                                .font(.caption2)
                         }
                     }
+                    .chartXSelection(value: $selectedDate)
 
-                    Text("Tap a dot to see sample details; scroll horizontally to explore earlier readings.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
+                    if let sample = selectedSample {
+                        SampleCallout(sample: sample)
+                    } else {
+                        Text("Tap a dot to see sample details; scroll horizontally to explore earlier readings.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .frame(minHeight: 44)
+                    }
 
                     PM25LegendView()
                 }
@@ -387,6 +451,40 @@ private struct ReportMetric: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding()
         .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 14))
+    }
+}
+
+/// Shown when the user taps Stop Tracking — summarizes samples from session start through stop time.
+private struct StopTrackingReportSheetContent: View {
+    let report: StopTrackingReport
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("From \(report.sessionStart.shortDateTimeString) to \(report.sessionEnd.shortDateTimeString)")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+
+                if report.summary.sampleCount == 0 {
+                    Text("No samples were recorded during this session.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 2), spacing: 12) {
+                        ReportMetric(title: "TWA PM2.5", value: report.summary.timeWeightedAveragePM25.formattedPM25)
+                        ReportMetric(title: "Peak PM2.5", value: report.summary.peakPM25.formattedPM25)
+                        ReportMetric(title: "Tracked time", value: report.summary.trackedSeconds.formattedDurationHours)
+                        ReportMetric(title: "High exposure", value: report.summary.highExposureSeconds.formattedDurationHours)
+                    }
+                    Text("\(report.summary.sampleCount) sample(s) in session.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+                Text("Time-weighted metrics use gaps capped like the main report. This session summary is not saved separately.")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            }
+            .padding()
+        }
     }
 }
 
@@ -437,7 +535,8 @@ private struct SampleCallout: View {
         .padding(8)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
         .shadow(color: .black.opacity(0.12), radius: 6, x: 0, y: 3)
-        .frame(maxWidth: 210)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(minHeight: 72)
     }
 }
 

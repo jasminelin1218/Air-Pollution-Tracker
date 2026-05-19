@@ -3,3 +3,5 @@ Secrets.xcconfig
 DerivedData/
 .DS_Store
 .venv_docx/
+tools/py_site/
+icon_source.png

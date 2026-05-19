@@ -18,10 +18,14 @@ final class ExposureTracker: NSObject, ObservableObject {
     @Published var lastSample: ExposureSample?
     @Published var statusMessage = "Ready to track exposure."
     @Published var errorMessage: String?
+    /// Set when the user stops tracking; presented as a sheet from `ContentView`.
+    @Published var stopReportSheet: StopTrackingReport?
 
     private let locationManager = CLLocationManager()
     private var modelContext: ModelContext?
     private var lastSampleDate: Date?
+    /// Start of the current tracking session (set when sampling begins successfully).
+    private var sessionStartedAt: Date?
 
     // Single chained sample timer.
     private var sampleTimer: Timer?
@@ -54,6 +58,7 @@ final class ExposureTracker: NSObject, ObservableObject {
 
     func startTracking() {
         errorMessage = nil
+        stopReportSheet = nil
         switch locationManager.authorizationStatus {
         case .notDetermined:
             locationManager.requestAlwaysAuthorization()
@@ -72,10 +77,33 @@ final class ExposureTracker: NSObject, ObservableObject {
     }
 
     func stopTracking() {
+        let endedAt = Date()
+        let rawTracking = UserDefaults.standard.object(forKey: SettingsKeys.trackingDays) as? Int
+            ?? TrackingDuration.sevenDays.rawValue
+        let duration = TrackingDuration(rawValue: rawTracking) ?? .sevenDays
+        let intervalStart = sessionStartedAt ?? endedAt.addingTimeInterval(-duration.windowInterval)
+
+        let sampleInterval = UserDefaults.standard.double(forKey: SettingsKeys.sampleIntervalSeconds)
+            .nonZero(defaultValue: Defaults.sampleIntervalSeconds)
+        let maxGap = min(sampleInterval * 2, duration.windowInterval / 4)
+        let threshold = (UserDefaults.standard.object(forKey: SettingsKeys.alertThreshold) as? Double)
+            ?? Defaults.alertThreshold
+
+        let sessionSamples = fetchSamples(from: intervalStart, through: endedAt)
+        let summary = WeeklyExposureReport.summarize(
+            samples: sessionSamples,
+            threshold: threshold,
+            maxGapSeconds: maxGap,
+            referenceEndDate: endedAt
+        )
+        stopReportSheet = StopTrackingReport(sessionStart: intervalStart, sessionEnd: endedAt, summary: summary)
+
         locationManager.stopUpdatingLocation()
         locationManager.stopMonitoringSignificantLocationChanges()
         stopSampleTimer()
         BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: ExposureTracker.bgRefreshID)
+        locationManager.pausesLocationUpdatesAutomatically = true
+        sessionStartedAt = nil
         isTracking = false
         statusMessage = "Tracking paused."
     }
@@ -102,6 +130,9 @@ final class ExposureTracker: NSObject, ObservableObject {
         locationManager.allowsBackgroundLocationUpdates = true
         locationManager.showsBackgroundLocationIndicator = true
         #endif
+        // If this stays true, iOS pauses updates while you appear stationary (e.g. overnight in bed),
+        // which stops background sampling. Tradeoff: slightly higher battery use while tracking.
+        locationManager.pausesLocationUpdatesAutomatically = false
         // Significant-change monitoring: resumes even after app termination (iOS re-launches the app).
         // Fires roughly when the device moves ~500 m or switches cell tower — ideal for our use case.
         locationManager.startMonitoringSignificantLocationChanges()
@@ -116,6 +147,7 @@ final class ExposureTracker: NSObject, ObservableObject {
         startSampleTimer()
 
         isTracking = true
+        sessionStartedAt = Date()
         statusMessage = "Tracking (low-power periodic sampling active)."
         scheduleBackgroundRefresh()
     }
@@ -126,9 +158,11 @@ final class ExposureTracker: NSObject, ObservableObject {
         locationManager.allowsBackgroundLocationUpdates = false
         #endif
         locationManager.stopUpdatingLocation()
+        locationManager.pausesLocationUpdatesAutomatically = true
         locationManager.distanceFilter = Defaults.minimumDistanceMeters
         startSampleTimer()
         isTracking = true
+        sessionStartedAt = Date()
         statusMessage = "Tracking (foreground only — grant Always permission for background)."
     }
 
@@ -316,12 +350,29 @@ final class ExposureTracker: NSObject, ObservableObject {
 
     // MARK: - Pruning & helpers
 
+    private func fetchSamples(from start: Date, through end: Date) -> [ExposureSample] {
+        guard let modelContext else { return [] }
+        let descriptor = FetchDescriptor<ExposureSample>(
+            predicate: #Predicate { sample in
+                sample.timestamp >= start && sample.timestamp <= end
+            },
+            sortBy: [SortDescriptor(\.timestamp)]
+        )
+        return (try? modelContext.fetch(descriptor)) ?? []
+    }
+
     private func pruneOldSamples() {
         guard let modelContext else { return }
         let rawDuration = UserDefaults.standard.object(forKey: SettingsKeys.trackingDays) as? Int
             ?? TrackingDuration.sevenDays.rawValue
-        let duration = TrackingDuration(rawValue: rawDuration) ?? .sevenDays
-        let cutoff = Date().addingTimeInterval(-duration.windowInterval)
+        let displayDuration = TrackingDuration(rawValue: rawDuration) ?? .sevenDays
+        // Never tie deletion to the short “report window” alone: a 1-hour or 6-hour view would
+        // wipe all older samples on the next save and make “yesterday + overnight” look empty.
+        let retentionInterval = max(
+            displayDuration.windowInterval,
+            TrackingDuration.sevenDays.windowInterval
+        )
+        let cutoff = Date().addingTimeInterval(-retentionInterval)
         let descriptor = FetchDescriptor<ExposureSample>(
             predicate: #Predicate { sample in
                 sample.timestamp < cutoff
