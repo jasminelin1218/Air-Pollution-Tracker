@@ -83,11 +83,13 @@ final class ExposureTracker: NSObject, ObservableObject {
         let duration = TrackingDuration(rawValue: rawTracking) ?? .sevenDays
         let intervalStart = sessionStartedAt ?? endedAt.addingTimeInterval(-duration.windowInterval)
 
-        let sampleInterval = UserDefaults.standard.double(forKey: SettingsKeys.sampleIntervalSeconds)
+        let sampleInterval = Self.persistedDouble(forKey: SettingsKeys.sampleIntervalSeconds, default: Defaults.sampleIntervalSeconds)
             .nonZero(defaultValue: Defaults.sampleIntervalSeconds)
-        let maxGap = min(sampleInterval * 2, duration.windowInterval / 4)
-        let threshold = (UserDefaults.standard.object(forKey: SettingsKeys.alertThreshold) as? Double)
-            ?? Defaults.alertThreshold
+        let sessionDurationSeconds = max(endedAt.timeIntervalSince(intervalStart), 1)
+        // Match main-report logic but use **session length**, not the chart “tracking window”
+        // (a short window setting was wrongly capping gaps and skewing TWA / tracked time).
+        let maxGap = min(sampleInterval * 2, sessionDurationSeconds / 4)
+        let threshold = Self.persistedDouble(forKey: SettingsKeys.alertThreshold, default: Defaults.alertThreshold)
 
         let sessionSamples = fetchSamples(from: intervalStart, through: endedAt)
         let summary = WeeklyExposureReport.summarize(
@@ -96,7 +98,13 @@ final class ExposureTracker: NSObject, ObservableObject {
             maxGapSeconds: maxGap,
             referenceEndDate: endedAt
         )
-        stopReportSheet = StopTrackingReport(sessionStart: intervalStart, sessionEnd: endedAt, summary: summary)
+        stopReportSheet = StopTrackingReport(
+            sessionStart: intervalStart,
+            sessionEnd: endedAt,
+            sampleIntervalSeconds: sampleInterval,
+            alertThreshold: threshold,
+            summary: summary
+        )
 
         locationManager.stopUpdatingLocation()
         locationManager.stopMonitoringSignificantLocationChanges()
@@ -390,6 +398,12 @@ final class ExposureTracker: NSObject, ObservableObject {
             return stored
         }
         return Bundle.main.object(forInfoDictionaryKey: "OPENAQAPIKey") as? String ?? ""
+    }
+
+    /// Reads a double written by `@AppStorage` / UserDefaults; avoids `double(forKey:) == 0` when unset.
+    private static func persistedDouble(forKey key: String, default defaultValue: Double) -> Double {
+        guard UserDefaults.standard.object(forKey: key) != nil else { return defaultValue }
+        return UserDefaults.standard.double(forKey: key)
     }
 }
 

@@ -31,7 +31,30 @@ struct StopTrackingReport: Identifiable {
     let id = UUID()
     let sessionStart: Date
     let sessionEnd: Date
+    /// Sampling cadence from Settings (used for this session’s TWA gap cap).
+    let sampleIntervalSeconds: Double
+    /// Alert threshold from Settings (high-exposure time uses this bar).
+    let alertThreshold: Double
     let summary: WeeklyExposureSummary
+
+    var sessionDurationDescription: String {
+        sessionEnd.formattedTimeSince(sessionStart)
+    }
+
+    /// Same rule as `stopTracking()` / `WeeklyExposureReport` for this session.
+    var twaMaxGapSeconds: Double {
+        let dur = max(sessionEnd.timeIntervalSince(sessionStart), 1)
+        return min(sampleIntervalSeconds * 2, dur / 4)
+    }
+
+    /// Human-readable cap for UI footnotes (minutes if under 1 hr).
+    var twaMaxGapDescription: String {
+        let s = twaMaxGapSeconds
+        if s >= 3600 {
+            return s.formattedDurationHours
+        }
+        return (s / 60).formatted(.number.precision(.fractionLength(0))) + " min"
+    }
 }
 
 enum WeeklyExposureReport {

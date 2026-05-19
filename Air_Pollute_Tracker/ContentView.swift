@@ -461,9 +461,13 @@ private struct StopTrackingReportSheetContent: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                Text("From \(report.sessionStart.shortDateTimeString) to \(report.sessionEnd.shortDateTimeString)")
+                Text("Session: \(report.sessionStart.shortDateTimeString) → \(report.sessionEnd.shortDateTimeString)")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
+                Text("Duration: \(report.sessionDurationDescription) · Sampling: \(report.sampleIntervalSeconds.formattedSamplingIntervalLabel) · Alert bar: \(report.alertThreshold.formattedPM25)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
 
                 if report.summary.sampleCount == 0 {
                     Text("No samples were recorded during this session.")
@@ -475,11 +479,16 @@ private struct StopTrackingReportSheetContent: View {
                         ReportMetric(title: "Tracked time", value: report.summary.trackedSeconds.formattedDurationHours)
                         ReportMetric(title: "High exposure", value: report.summary.highExposureSeconds.formattedDurationHours)
                     }
-                    Text("\(report.summary.sampleCount) sample(s) in session.")
+                    Text("\(report.summary.sampleCount) sample(s). “High exposure” counts time when PM2.5 was at or above \(report.alertThreshold.formattedPM25), with the same gap caps as TWA.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-                Text("Time-weighted metrics use gaps capped like the main report. This session summary is not saved separately.")
+                Text("TWA weights gaps between samples by at most \(report.twaMaxGapDescription) each (min of 2× sampling interval and session length ÷ 4), ending at stop time.")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("This summary is not saved separately.")
                     .font(.caption)
                     .foregroundStyle(.tertiary)
             }
