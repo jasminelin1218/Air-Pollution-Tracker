@@ -48,7 +48,7 @@ going outside.
 | iOS | 17.0+ |
 | Xcode | 15.0+ |
 | Swift | 5.9+ |
-| OpenAQ API key | Free — [get one here](https://openaq.org/developers/api-keys) |
+| OpenAQ API key | Free |
 
 ---
 
