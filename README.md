@@ -1,5 +1,5 @@
-<img width="1024" height="1024" alt="AppIcon" src="https://github.com/user-attachments/assets/75e5cbe2-4de4-4e6e-8178-55d7792178fb" />
-# Air Pollute Tracker
+<img width="256" height="256" alt="AppIcon" src="https://github.com/user-attachments/assets/75e5cbe2-4de4-4e6e-8178-55d7792178fb" />
+## Air Pollute Tracker
 
 A native iOS app that estimates your personal PM2.5 exposure in real time by
 continuously recording your GPS location, querying the
