@@ -156,7 +156,13 @@ Background execution is maintained by three complementary mechanisms:
 3. **BGAppRefreshTask** — iOS-managed periodic wakeup; acts as a fallback
    when the device is stationary for a long time.
 
-## Demo<img width="353" height="768" alt="73F01390-D9E0-4C5A-9D39-1E499FFCCCAF_1_201_a" src="https://github.com/user-attachments/assets/0c6ac770-6ff1-4376-9cf3-58f02018bb3d" />
+## Demo Video
+https://youtube.com/shorts/7sGxT79CNoU?feature=share
+
+
+
+
+
 
    
 
